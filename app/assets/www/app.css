@@ -81,6 +81,8 @@ html, body {
 /* 顶栏分类按钮：分类名可能很长，限宽省略，别把标题挤走 */
 #chat-cat { max-width: 118px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .login-error { color: var(--danger); font-size: 13px; min-height: 20px; margin: 10px 2px; }
+/* 登录失败详情：可换行、保留错误原文（诊断「点了没反应」用，不要 ellipsis 截断） */
+.login-error--verbose { white-space: pre-wrap; word-break: break-word; line-height: 1.5; }
 .login-tip { color: var(--muted); font-size: 11.5px; margin-top: 16px; line-height: 1.6; }
 
 /* ---------- lists ---------- */

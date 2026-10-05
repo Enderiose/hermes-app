@@ -11,6 +11,7 @@ import android.webkit.JavascriptInterface;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebChromeClient.FileChooserParams;
+import android.webkit.ConsoleMessage;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
@@ -76,6 +77,14 @@ public class MainActivity extends Activity {
         public boolean onShowFileChooser(WebView webView, ValueCallback<Uri[]> filePathCallback,
                                          FileChooserParams fileChooserParams) {
             activity.startImagePicker(filePathCallback, fileChooserParams);
+            return true;
+        }
+
+        /** 把网页 console 输出转发到 logcat（tag=HermesApp）。
+         *  页面里的报错否则只存在于 WebView 内部，插线看 logcat 也看不到。 */
+        public boolean onConsoleMessage(ConsoleMessage cm) {
+            android.util.Log.i("HermesApp", "[console] " + cm.message()
+                    + " @" + cm.sourceId() + ":" + cm.lineNumber());
             return true;
         }
     }

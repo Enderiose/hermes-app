@@ -101,11 +101,33 @@ function toast(msg, ms = 2400) {
 }
 
 /* ============================== API ============================== */
+
+/** 请求超时（毫秒）。WebView 里 fetch 被系统/厂商 ROM 静默吞掉时不会 reject，
+ *  只表现为「按钮点了没反应」，必须自己加超时才能把这种静默失败变成一句错误。 */
+const API_TIMEOUT_MS = 15000;
+
+/** 带超时的 fetch。超时/网络错误都转成可读的 Error，绝不静默。 */
+async function fetchWithTimeout(url, opts = {}, timeoutMs = API_TIMEOUT_MS) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), timeoutMs);
+  try {
+    return await fetch(url, Object.assign({}, opts, { signal: ctl.signal }));
+  } catch (e) {
+    if (e && (e.name === 'AbortError' || e.name === 'TimeoutError')) {
+      const base = (state.base || '').replace(/\/$/, '');
+      throw new Error('请求超时（' + Math.round(timeoutMs / 1000) + ' 秒无响应）→ ' + base + '。请确认手机能访问该地址、端口没被防火墙挡住');
+    }
+    throw new Error('网络请求失败：' + ((e && e.message) || e) + '（当前地址 ' + (state.base || '').replace(/\/$/, '') + '）');
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function api(path, opts = {}) {
   const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
   if (state.token) headers['Authorization'] = 'Bearer ' + state.token;
   if (state.profile && !opts.noProfileHeader) headers['X-Hermes-Profile'] = state.profile;
-  const res = await fetch(state.base.replace(/\/$/, '') + path, {
+  const res = await fetchWithTimeout(state.base.replace(/\/$/, '') + path, {
     method: opts.method || 'GET',
     headers,
     body: opts.body ? JSON.stringify(opts.body) : undefined,
@@ -332,6 +354,8 @@ async function doLogin() {
   }
 
   $('login-btn').disabled = true;
+  const started = Date.now();
+  errEl.textContent = '登录中…';
   try {
     state.base = base;
     const res = await api('/api/auth/login', { method: 'POST', body: { username: user, password: pass }, noProfileHeader: true });
@@ -351,9 +375,16 @@ async function doLogin() {
     loadAvatar();          // 登录后拉头像（失败不影响主流程）
     switchTab('sessions');
   } catch (e) {
-    errEl.textContent = e.message || '登录失败';
+    // 静默失败是这个应用最常见的坑（旧包残留 / origin 不匹配 / ROM 拦明文 / 端口不通），
+    // 所以这里把错误原样显示出来，而不是让它看起来像「按钮没反应」。
+    const ms = Date.now() - started;
+    const msg = (e && e.message) || '登录失败';
+    errEl.textContent = '登录失败（' + ms + 'ms）：' + msg;
+    errEl.classList.add('login-error--verbose');
+    console.error('[login] failed', { base, user, ms, message: msg, stack: e && e.stack });
   } finally {
     $('login-btn').disabled = false;
+    errEl.classList.remove('login-error--verbose');
   }
 }
 
