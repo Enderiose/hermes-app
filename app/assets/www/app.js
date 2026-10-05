@@ -586,7 +586,17 @@ function connectSocket() {
   on('run.peer_user_message', (ev) => {
     if (state.cur !== ev.session_id) return;
     const m = ev.message;
-    if (m && m.content) addMsg({ role: 'user', content: m.content, ts: m.timestamp });
+    if (m && m.content) {
+      // 去重：服务端排除的是"投递那条排队消息的 socket.id"（peerExcludeSocketId=originSocketId），
+      // 但 App 重连后 socket.id 变了 → 排除失效 → 会把自己刚插入的排队消息当"对端消息"回推。
+      // 本地已经通过 run.queued(dequeued_queue_id) 把它 promote 进消息流，再追加就是两条一样的。
+      // 服务端回推时 `id` 就是 queue_id（handle-bridge-run: id: data.queue_id || messageId），
+      // 而本地 promote 时把它记在 msg.queueId 上 —— 按这个键精确去重。
+      // ⚠️ 不能用"内容相同"去重：用户连着发两条一样的话是合法操作（2026-10-05 截图里就是）。
+      const mid = m.id != null ? String(m.id) : '';
+      const already = mid && state.msgs.some((x) => String(x.queueId || '') === mid);
+      if (!already) addMsg({ role: 'user', content: m.content, ts: m.timestamp });
+    }
     loadSessionsSoon();
   });
 
