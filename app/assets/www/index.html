@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#0f1115">
+  <title>Hermes 移动版</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <div id="app">
+    <!-- ============ 登录 ============ -->
+    <section id="view-login" class="view">
+      <div class="login-wrap">
+        <div class="login-logo">H<span>·</span>Mobile</div>
+        <div class="login-sub">Hermes 移动版 · 与 Web 版实时同步</div>
+        <label class="field"><span>服务器地址</span>
+          <input id="login-base" type="url" placeholder="__DEFAULT_BASE_URL__" autocomplete="off">
+        </label>
+        <label class="field"><span>用户名</span>
+          <input id="login-user" type="text" placeholder="Studio 登录用户名" autocomplete="username">
+        </label>
+        <label class="field"><span>密码</span>
+          <input id="login-pass" type="password" placeholder="Studio 登录密码" autocomplete="current-password">
+        </label>
+        <button id="login-btn" class="btn-primary">登 录</button>
+        <div id="login-error" class="login-error"></div>
+        <div class="login-tip">登录凭据使用 Web 版同一套账号；token 只存在本机。</div>
+      </div>
+    </section>
+
+    <!-- ============ 会话列表 ============ -->
+    <section id="view-sessions" class="view hidden">
+      <header class="topbar">
+        <div class="topbar-title">会话</div>
+        <div class="topbar-actions">
+          <button id="btn-cats" class="icon-btn" title="分类管理">🏷</button>
+          <button id="btn-search" class="icon-btn" title="搜索">🔍</button>
+          <button id="btn-settings" class="icon-btn" title="设置">⚙</button>
+        </div>
+      </header>
+      <div id="search-bar" class="search-bar hidden">
+        <input id="search-input" type="search" placeholder="搜索会话…">
+        <button id="search-cancel" class="btn-ghost">取消</button>
+      </div>
+      <div id="session-list" class="list"></div>
+      <button id="fab-new" class="fab">＋</button>
+      <nav class="tabbar">
+        <div class="tab active" data-tab="sessions">💬 会话</div>
+        <div class="tab" data-tab="wecom">🐧 企微</div>
+        <div class="tab" data-tab="settings">⚙ 设置</div>
+      </nav>
+    </section>
+
+    <!-- ============ 企微会话列表 ============ -->
+    <section id="view-wecom" class="view hidden">
+      <header class="topbar">
+        <div class="topbar-title">企微 Bot 会话</div>
+        <div class="topbar-actions">
+          <button id="wecom-refresh" class="icon-btn" title="刷新">⟳</button>
+        </div>
+      </header>
+      <div class="wecom-note">这里显示你在企业微信里和 Bot 的对话（只读同步）。回复请在企业微信里发。</div>
+      <div id="wecom-list" class="list"></div>
+      <nav class="tabbar">
+        <div class="tab" data-tab="sessions">💬 会话</div>
+        <div class="tab active" data-tab="wecom">🐧 企微</div>
+        <div class="tab" data-tab="settings">⚙ 设置</div>
+      </nav>
+    </section>
+
+    <!-- ============ 设置 ============ -->
+    <section id="view-settings" class="view hidden">
+      <header class="topbar">
+        <div class="topbar-title">设置</div>
+      </header>
+      <div class="settings">
+        <div class="set-row"><span>服务器</span><b id="set-base"></b></div>
+        <div class="set-row"><span>账号</span><b id="set-user"></b></div>
+        <div class="set-row"><span>Profile</span>
+          <select id="set-profile"></select>
+        </div>
+        <div class="set-row"><span>连接状态</span><b id="set-conn">—</b></div>
+        <div class="set-row"><span>版本</span><b id="set-version">—</b></div>
+        <button id="btn-logout" class="btn-danger">退出登录</button>
+        <button id="btn-finish" class="btn-ghost">退出应用</button>
+        <div class="login-tip">本应用为临时客户端，会话数据与 Web 版完全共享；删除会话等操作请到 Web 版。</div>
+      </div>
+      <nav class="tabbar">
+        <div class="tab" data-tab="sessions">💬 会话</div>
+        <div class="tab" data-tab="wecom">🐧 企微</div>
+        <div class="tab active" data-tab="settings">⚙ 设置</div>
+      </nav>
+    </section>
+
+    <!-- ============ 聊天 ============ -->
+    <section id="view-chat" class="view hidden">
+      <header class="topbar">
+        <button id="chat-back" class="icon-btn">‹</button>
+        <div class="topbar-title small">
+          <div id="chat-title">新会话</div>
+          <div id="chat-sub" class="chat-sub">—</div>
+        </div>
+        <div class="topbar-actions">
+          <button id="chat-cat" class="btn-ghost tiny">分类</button>
+          <button id="chat-model" class="btn-ghost tiny">模型</button>
+        </div>
+      </header>
+      <!-- 上下文用量 / 上限 -->
+      <div id="ctx-bar" class="ctx-bar">
+        <div id="ctx-text" class="ctx-text">上下文 —</div>
+        <div class="ctx-track"><div id="ctx-fill" class="ctx-fill"></div></div>
+      </div>
+      <div id="chat-model-sheet" class="sheet hidden">
+        <div class="sheet-head">
+          <div class="sheet-title">模型与推理强度</div>
+          <button id="model-sheet-close" class="sheet-close" title="关闭">✕</button>
+        </div>
+        <div id="model-list" class="model-list"></div>
+        <button class="btn-ghost" id="model-default">使用默认模型</button>
+
+        <!-- 推理强度滑块（复刻 web 端：8 档，逐档配色） -->
+        <div class="effort-block">
+          <div class="effort-head">
+            <span>推理强度</span>
+            <strong id="effort-label">默认</strong>
+          </div>
+          <input id="effort-slider" class="effort-slider" type="range" min="0" max="7" step="1" value="0">
+          <div class="effort-range">
+            <span>默认</span><span>Max</span>
+          </div>
+          <div class="effort-hint">拖动选择 · 共 8 档</div>
+        </div>
+        <button class="btn-ghost" id="model-sheet-done">完成</button>
+      </div>
+      <!-- 会话分类（新建会话时选归属；已存在的会话改归属） -->
+      <div id="chat-cat-sheet" class="sheet hidden">
+        <div class="sheet-head">
+          <div class="sheet-title">会话分类</div>
+          <button id="cat-sheet-close" class="sheet-close" title="关闭">✕</button>
+        </div>
+        <div id="cat-list" class="cat-list"></div>
+        <button class="btn-ghost" id="cat-new">＋ 新建分类</button>
+      </div>
+      <div id="msg-list" class="msgs"></div>
+      <div id="chat-cards"></div>
+      <!-- 不在底部时的「⬇️ 回到底部」按钮 -->
+      <button id="btn-jump-bottom" class="jump-bottom hidden" title="回到底部">⬇️ 回到底部</button>
+      <footer class="composer">
+        <button id="chat-stop" class="icon-btn stop hidden" title="停止">■</button>
+        <textarea id="chat-input" rows="1" placeholder="发消息…（可直接粘贴图片）"></textarea>
+        <button id="chat-send" class="btn-primary send">发送</button>
+      </footer>
+    </section>
+  </div>
+
+  <!-- 图片选择（隐藏，由 composer 按钮触发，走原生 WebChromeClient 选择弹窗） -->
+  <input id="img-picker" type="file" accept="image/*" class="visually-hidden">
+  <div id="attach-bar" class="attach-bar hidden">
+    <div id="attach-list" class="attach-list"></div>
+  </div>
+  <div id="toast" class="toast hidden"></div>
+
+  <!-- 通用底部动作表（分类选择 / 分类管理 / 会话操作） -->
+  <div id="menu-sheet" class="menu-sheet hidden">
+    <div class="menu-card">
+      <div id="menu-title" class="menu-title"></div>
+      <div id="menu-list" class="menu-list"></div>
+      <button id="menu-cancel" class="btn-ghost">取消</button>
+    </div>
+  </div>
+
+  <!-- 通用输入 / 确认弹窗（重命名、新建、删除确认；WebView 里 window.prompt 不可用） -->
+  <div id="modal" class="modal hidden">
+    <div class="modal-card">
+      <div id="modal-title" class="modal-title"></div>
+      <div id="modal-body" class="modal-body"></div>
+      <div class="modal-actions">
+        <button id="modal-cancel" class="btn-ghost">取消</button>
+        <button id="modal-ok" class="btn-primary">确定</button>
+      </div>
+    </div>
+  </div>
+  <!-- 复用服务端自带的 socket.io 客户端（同源，版本与服务端天然一致，不必内嵌副本） -->
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,31 @@
+# 构建产物：out/ 目录本身提交（.gitkeep 占位），内容全部忽略
+out/*
+!out/.gitkeep
+
+# 真实签名密钥：仓库里只保留 signing.jks.example 模板
+signing.jks
+*.keystore
+*.jks.bak
+
+# Python 缓存
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# 编辑器 / 系统垃圾
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# 本机构建配置（只提交示例）
+config.env
+
+# 发布产物暂存（APK 不上仓库）
+dist/
+
+# 构建时生成的单文件页面（含构建机的默认服务器地址，别提交；build.sh 每次重新生成）
+app/assets/www/inline.html
+
+# 内部工程上下文（含本机路径/私密信息，不进公开仓库）
+CONTEXT.md
