@@ -55,6 +55,12 @@ const state = {
   reasoningEffort: '',
   /** 服务端给的真实上下文占用（contextTokens），比 REST 累计用量准 */
   contextTokens: 0,
+  /**
+   * 企微/hermes-history 会话的用量退路：`/api/studio/sessions/hermes/:id`
+   * 返回的 input_tokens+output_tokens（Hermes state.db 的会话累计，web 版同口径）。
+   * 这类会话没有 socket 状态，服务端 /usage 也查不到（studio 库只记自己跑的 run）。
+   */
+  hermesUsage: { input: 0, output: 0 },
   /** 正在插入中的排队消息 id（服务端 run.queue_insertion.updated 推来） */
   queueInsertingId: null,
   /** 展开的工具轮次：runMarker -> true */
@@ -1243,6 +1249,7 @@ async function openSession(id, title, hermes, model) {
   state.reasoningEffort = (row && row.reasoning_effort) || '';
   state.curProvider = (row && row.provider) || '';   // 查上下文上限要用会话自身的模型
   state.contextTokens = 0;      // 换会话先清零，等 resumed / usage.updated 回填
+  state.hermesUsage = { input: 0, output: 0 };   // 同上：企微会话的用量由 loadMessages 回填
   stopThinkingTimer();          // 计时归零，等 resumed 决定要不要起
   show('chat');
   atBottom = true;                // 打开会话先假定在底部
@@ -1279,6 +1286,13 @@ async function loadMessages() {
       if (state.cur !== id) return;
       const msgs = (res.session && res.session.messages) || res.messages || [];
       state.msgs = normalizeHistory(msgs);
+      // 用量退路：Hermes 会话的 in+out（web 版 ChatInput 对这类会话也是这个口径）。
+      // 服务端 /sessions/:id/usage 只统计 studio 自己跑的 run，企微会话恒返回 0。
+      const hs = res.session || {};
+      state.hermesUsage = {
+        input: Number(hs.input_tokens) || 0,
+        output: Number(hs.output_tokens) || 0,
+      };
       state.lastHistoryRun = lastRunMarker(state.msgs);
       renderMsgs();
       jumpToLatest();      // 打开会话即定位到最新消息
@@ -2050,6 +2064,11 @@ function cycleContextLimit() {
  * 退路才是 `input + output`（**不含 cache_read**）。
  * 早期版本用 REST /usage 把 input+output+cache_read 全加起来，那是**累计计费用量**，
  * 会明显偏大（实测 431.2k vs web 273.0k）——不要再那样算。
+ *
+ * **企微（hermes-history）会话**：既没有 socket 状态（不发 `resume`），
+ * `/api/studio/sessions/:id/usage` 也查不到（studio 库只记自己跑的 run，实测恒 0/0），
+ * 所以用量取 `GET /api/studio/sessions/hermes/:id` 的 `input_tokens+output_tokens`
+ * —— Hermes state.db 的会话累计，与 web 端对这类会话的 fallback 同口径。
  */
 async function loadContextUsage() {
   const id = state.cur;
@@ -2071,6 +2090,11 @@ async function loadContextUsage() {
 
   // 2) 用量：优先 socket 带的 contextTokens
   let used = Number(state.contextTokens) || 0;
+  // 2b) 企微等 hermes-history 会话不走 socket、也没有 studio 用量记录 →
+  //     用 /sessions/hermes/:id 的 in+out（loadMessages 已回填），否则恒为 0
+  if (!used && state.curHermes) {
+    used = (Number(state.hermesUsage.input) || 0) + (Number(state.hermesUsage.output) || 0);
+  }
   if (!used) {
     // 退路：REST 的 input+output（与 web 版 fallback 一致，不加 cache_read）
     const usage = await api('/api/studio/sessions/' + encodeURIComponent(id) + '/usage'
