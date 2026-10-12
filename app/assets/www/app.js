@@ -577,6 +577,34 @@ function connectSocket() {
     }
   });
 
+  // ---- 会话活动（服务端权威）----
+  // 列表里的「● 运行中」不能只靠当前会话的 run 事件：
+  //   · run.completed 只发给 `session:<id>` 房间（或发起它的那个 socket），
+  //     App 切后台/断线重连后不在房间里 → 这条事件永久错过 → 列表一直挂着「运行中」，
+  //     要手动点进会话触发 resume 才消。
+  //   · 别的端（网页/企微/另一台设备）发起的 run，App 本来也收不到。
+  // 服务端为此另发两条**与房间无关**的事件（见 chat-run.ts onConnection / emitSessionActivity）：
+  //   · `session.activity.snapshot`：每次连上（含重连）发一次，权威列出该 profile 正在跑的会话；
+  //   · `session.activity`：每次 run 生命周期（started/completed/failed/abort）广播给
+  //     `pending-interactions:<profile>` 房间——App 连上时就被服务端自动加进这个房间。
+  on('session.activity.snapshot', (ev) => {
+    const running = new Set((ev.sessions || [])
+      .map((s) => String((s && s.session_id) || ''))
+      .filter(Boolean));
+    // 快照是「此刻在跑什么」的权威答案：不在里面的就不是在跑。
+    // 本地乐观态（刚点发送、服务端还没起跑）由随后的 run.started 补回来。
+    for (const sid of Object.keys(state.working)) {
+      if (!running.has(sid)) delete state.working[sid];
+    }
+    for (const sid of running) state.working[sid] = true;
+    syncStopButton();
+    renderVisibleLists();
+  });
+  on('session.activity', (ev) => {
+    if (!ev.session_id) return;
+    markWorking(String(ev.session_id), ev.status === 'running');
+  });
+
   // ---- 会话元数据（web 端改动实时同步）----
   on('session.title.updated', (ev) => {
     const s = state.sessions.find((x) => x.id === ev.session_id);
@@ -1185,15 +1213,22 @@ function touchSessionPreview(sid, text) {
   }
 }
 
+/** 「停止」按钮只跟当前会话在不在跑有关。 */
+function syncStopButton() {
+  $('chat-stop').classList.toggle('hidden', !(state.cur && state.working[state.cur]));
+}
+
+/** 哪个列表在屏上就刷哪个（两个列表都显示「● 运行中」）。 */
+function renderVisibleLists() {
+  if (state.view === 'sessions') renderSessions();
+  else if (state.view === 'wecom') renderWecomList();
+}
+
 function markWorking(sid, on) {
   if (!sid) return;
   if (on) state.working[sid] = true; else delete state.working[sid];
-  if (on && state.cur === sid) {
-    $('chat-stop').classList.remove('hidden');
-  } else if (!on && state.cur === sid) {
-    $('chat-stop').classList.add('hidden');
-  }
-  if (state.view === 'sessions') renderSessions();
+  syncStopButton();
+  renderVisibleLists();
 }
 
 function toggleSearch(on) {
@@ -1216,12 +1251,16 @@ async function doSearch() {
 }
 
 /* ============================== 企微 ============================== */
+function renderWecomList() {
+  renderSessions(state.wecom, 'wecom-list', '暂无企微 Bot 会话', { flat: true });
+}
+
 async function loadWecom() {
   try {
     const res = await api('/api/studio/sessions/hermes?source=wecom_callback&limit=30&profile=' + encodeURIComponent(state.profile), { noProfileHeader: true });
     state.wecom = res.sessions || [];
     // 企微会话本身就是单一来源，不需要分组
-    renderSessions(state.wecom, 'wecom-list', '暂无企微 Bot 会话', { flat: true });
+    renderWecomList();
   } catch (e) {
     $('wecom-list').innerHTML = '<div class="empty">' + esc(e.message) + '</div>';
   }
