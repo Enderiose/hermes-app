@@ -65,6 +65,8 @@ const state = {
   queueInsertingId: null,
   /** 展开的工具轮次：runMarker -> true */
   expandedRuns: {},
+  /** 进行中的思考条是否展开看全文（默认收起 = 只占一行） */
+  expandedReasoning: false,
   /** 新建会话时选好的分类 id（首个 run 随 category_id 带上，服务端 createSession 落库） */
   newSessionCategoryId: null,
   /**
@@ -467,6 +469,7 @@ function connectSocket() {
     if (state.cur === ev.session_id) {
       if (!state.streaming || state.streaming.sid !== ev.session_id) startStream(ev.session_id);
       state.streaming.text += (ev.delta || '');
+      state.streaming.thinking = false;   // 正文开始流 → 思考阶段结束，思考条立刻隐藏（不占位）
       paintStream();
     }
     markWorking(ev.session_id, true);
@@ -477,6 +480,7 @@ function connectSocket() {
     if (state.streaming && ev.already_streamed) return;
     if (!state.streaming || state.streaming.sid !== ev.session_id) startStream(ev.session_id);
     state.streaming.text = ev.delta || ev.output || ev.text || '';
+    state.streaming.thinking = false;
     paintStream();
   });
 
@@ -486,6 +490,7 @@ function connectSocket() {
     if (state.cur !== ev.session_id) return;
     if (!state.streaming || state.streaming.sid !== ev.session_id) startStream(ev.session_id);
     state.streaming.reasoning += (ev.text || ev.delta || '');
+    state.streaming.thinking = true;    // 思考阶段开始（只占一行，见 reasoningLineHtml）
     paintStream();
   };
   on('reasoning.delta', reasoning);
@@ -499,6 +504,7 @@ function connectSocket() {
   // 于是「会话激活期工具全是单条，切走再切回重拉历史才整合」。
   on('tool.started', (ev) => {
     if (!isMine(ev)) return;
+    if (state.streaming) state.streaming.thinking = false;   // 去调工具 → 这段思考结束
     markWorking(ev.session_id, true);
     if (state.cur === ev.session_id) upsertLiveTool(ev, 'running');
   });
@@ -1486,6 +1492,12 @@ function renderMsgs() {
       cancelQueued(b.getAttribute('data-qid'));
     });
   });
+  // 进行中的思考条：点一下展开/收起全文（收起时只占一行）
+  const rline = el.querySelector('#reasoning-line');
+  if (rline) rline.addEventListener('click', () => {
+    state.expandedReasoning = !state.expandedReasoning;
+    renderMsgs();
+  });
   // 工具轮次行：点一下展开/收起
   el.querySelectorAll('.tool-run-row').forEach((b) => {
     b.addEventListener('click', () => {
@@ -1638,6 +1650,9 @@ function imagesHtml(images) {
   }).join('');
 }
 
+/** 思考结束后的处理：'hide' = 直接隐藏（不占位，默认）｜'line' = 单行折叠条 */
+const DONE_REASONING = 'hide';
+
 function msgHtml(m) {
   if (m.role === 'tool' || m.role === 'command' || m.tool) {
     // 工具行与助手消息同列：左侧占位对齐头像宽度
@@ -1651,49 +1666,99 @@ function msgHtml(m) {
     '</div>';
   }
   const side = m.role === 'user' ? 'user' : (m.role === 'system' ? 'system' : 'assistant');
+  const imgs = imagesHtml(m.images);
+  const bodyHtml = String(m.content == null ? '' : m.content).trim() ? wrapOverflow(md(m.content)) : '';
+  /**
+   * 思考过程的显示策略（用户 2026-10-18 反馈：新版每条思考都留一块占位，一屏全是「▸ 思考过程」）：
+   * · 思考**一结束就隐藏**，不再占位 —— 默认行为（DONE_REASONING = 'hide'）。
+   * · 进行中的思考只占**一行**，见 streamHtml() / reasoningLineHtml()。
+   * 若哪天想恢复"结束后仍能点开看"，把这里改成 'line' 即可（渲染成单行折叠条）。
+   */
   let extra = '';
-  if (m.reasoning) {
+  if (m.reasoning && DONE_REASONING === 'line') {
     extra = '<details class="reasoning"><summary>思考过程</summary><div class="reasoning-body">' + esc(m.reasoning) + '</div></details>';
   }
-  const imgs = imagesHtml(m.images);
+  // 没有正文也没有图片（典型：思考结束后被"恢复"出来的空 assistant 消息）→ 整条不渲染。
+  // 否则会留下「头像 + 空气泡 + 时间」这一行纯占位（用户报的第二个问题）。
+  if (!bodyHtml && !imgs) return '';
   // system 消息不带头像（居中提示条）
   const lineInner = side === 'system'
-    ? wrapOverflow(md(m.content))
+    ? bodyHtml
     : (side === 'user' ? userAvatarHtml() : botAvatarHtml()) +
-      '<div class="bubble">' + (imgs + (m.content ? wrapOverflow(md(m.content)) : '')) + '</div>';
+      '<div class="bubble">' + (imgs + bodyHtml) + '</div>';
   return extra + '<div class="msg ' + side + '">' +
     '<div class="msg-line">' + lineInner + '</div>' +
     (m.ts ? '<div class="msg-time">' + fmtTime(m.ts) + '</div>' : '') +
   '</div>';
 }
 
+/** 思考文本压成一行尾巴：空白折叠、只留尾部 80 字，超长加省略号。 */
+function reasoningTail(text) {
+  const s = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!s) return '';
+  return s.length > 80 ? '…' + s.slice(-80) : s;
+}
+
+/**
+ * 进行中的思考条：**只占一行**（用户 2026-10-18 要求）。
+ * 点一下展开全文（面板 max-height 40vh 可滚动），再点收起。
+ * 思考结束 → 这条直接消失（不占位），所以永远最多只有一行思考 UI。
+ */
+function reasoningLineHtml(text) {
+  const open = !!state.expandedReasoning;
+  return '<div class="reasoning-line' + (open ? ' open' : '') + '" id="reasoning-line">' +
+      '<span class="r-label">思考中</span>' +
+      '<span class="r-text" id="reasoning-tail">' + esc(reasoningTail(text)) + '</span>' +
+      '<span class="r-caret">' + (open ? '▾' : '▸') + '</span>' +
+    '</div>' +
+    '<div class="reasoning-panel' + (open ? ' open' : '') + '" id="reasoning-panel">' +
+      '<div class="reasoning-body" id="reasoning-body">' + esc(text) + '</div>' +
+    '</div>';
+}
+
 function streamHtml() {
   const st = state.streaming;
-  let extra = '';
-  if (st.reasoning) {
-    extra = '<details class="reasoning"><summary>思考过程（进行中）</summary><div class="reasoning-body">' + esc(st.reasoning) + '</div></details>';
-  }
-  return extra + '<div class="msg assistant">' +
+  const hasText = !!(st.text && String(st.text).trim());
+  // 没有正文时不画空气泡（只留一个闪烁光标，见 .bubble.caret-only）
+  return '<div class="msg assistant">' +
+    (st.reasoning && st.thinking ? reasoningLineHtml(st.reasoning) : '') +
     '<div class="msg-line">' + botAvatarHtml() +
-      '<div class="bubble caret" id="stream-bubble">' + (st.text ? wrapOverflow(md(st.text)) : '') + '</div>' +
+      '<div class="bubble caret' + (hasText ? '' : ' caret-only') + '" id="stream-bubble">' +
+        (hasText ? wrapOverflow(md(st.text)) : '') +
+      '</div>' +
     '</div>' +
   '</div>';
 }
 
 function startStream(sid) {
   if (state.streaming && state.streaming.sid === sid) return;
-  // 保存上一条未结束的流
-  if (state.streaming && state.streaming.text) {
+  // 保存上一条未结束的流：只落有正文的（思考结束就隐藏，不单独落一条空消息）
+  if (state.streaming && String(state.streaming.text || '').trim()) {
     state.msgs.push({ key: 's' + Date.now(), role: 'assistant', content: state.streaming.text, reasoning: state.streaming.reasoning, ts: Date.now() / 1000 });
   }
-  state.streaming = { sid, text: '', reasoning: '' };
+  state.streaming = { sid, text: '', reasoning: '', thinking: false };
+  state.expandedReasoning = false;   // 新的一轮思考从收起态开始（只占一行）
   renderMsgs();
 }
 
 function paintStream() {
+  const st = state.streaming;
+  if (!st) return;
+  // 思考条只在"正在思考"时存在：出现/消失各整块重绘一次，之后的增量只改文本（不重排整列）。
+  const wantLine = !!(st.reasoning && st.thinking);
+  const hasLine = !!$('reasoning-line');
+  if (wantLine !== hasLine) { renderMsgs(); return; }
   const b = $('stream-bubble');
   if (!b) { renderMsgs(); return; }
-  b.innerHTML = wrapOverflow(md(state.streaming.text));
+  const hasText = !!(st.text && String(st.text).trim());
+  b.innerHTML = hasText ? wrapOverflow(md(st.text)) : '';
+  b.classList.toggle('caret-only', !hasText);
+  const tail = $('reasoning-tail');
+  if (tail) tail.textContent = reasoningTail(st.reasoning);
+  if (state.expandedReasoning) {
+    const body = $('reasoning-body');
+    if (body) body.textContent = st.reasoning;
+  }
   // 用户上滑翻历史时绝不打断；atBottom=true 时才跟随（沿用上次修复的语义）
   scrollBottom();
 }
@@ -1701,14 +1766,15 @@ function paintStream() {
 function finishStream(finalText, error) {
   const st = state.streaming;
   const text = finalText != null && finalText.length ? finalText : (st ? st.text : '');
-  if (st && (text || st.reasoning)) {
+  const body = String(text || '').trim();
+  state.expandedReasoning = false;
+  // 只落有正文的消息：思考结束后的空文本不再变成一条空消息（那就是用户看到的那排空气泡占位）。
+  if (body || error) {
     state.msgs.push({
       key: 'f' + Date.now(), role: 'assistant',
-      content: text + (error ? '\n\n> ⚠ ' + error : ''),
-      reasoning: st.reasoning, ts: Date.now() / 1000,
+      content: body + (error ? '\n\n> ⚠ ' + error : ''),
+      reasoning: st ? st.reasoning : '', ts: Date.now() / 1000,
     });
-  } else if (error) {
-    state.msgs.push({ key: 'e' + Date.now(), role: 'system', content: '⚠ ' + error, ts: Date.now() / 1000 });
   }
   state.streaming = null;
   renderMsgs();

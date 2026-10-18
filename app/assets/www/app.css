@@ -272,6 +272,34 @@ html, body {
   overflow-wrap: anywhere; max-height: 240px; overflow-y: auto; overflow-x: hidden;
 }
 
+/* ---------- 进行中的思考条：只占一行 ---------- */
+/* 用户 2026-10-18：思考过程不许再占一整块，进行中也只占一行；结束后整条消失（由 JS 不渲染）。 */
+.reasoning-line {
+  display: flex; align-items: center; gap: 6px;
+  width: 100%; height: 22px; padding-left: 38px;   /* 38px = 头像 30 + 间距 8，与气泡文字左对齐 */
+  font-size: 11.5px; color: var(--muted); cursor: pointer;
+}
+.reasoning-line .r-label { flex: 0 0 auto; color: var(--accent); opacity: .9; }
+.reasoning-line .r-text {
+  flex: 1 1 auto; min-width: 0;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.reasoning-line .r-caret { flex: 0 0 auto; font-size: 9px; opacity: .65; }
+.reasoning-panel { display: none; width: 100%; margin: 2px 0 6px; }
+.reasoning-panel.open { display: block; }
+.reasoning-panel .reasoning-body {
+  padding: 8px 10px; background: #12151d; border: 1px solid var(--line);
+  border-radius: 10px; font-size: 11.5px; color: var(--muted);
+  white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere;
+  max-height: 40vh; overflow-y: auto;
+}
+/* 流式气泡还没有正文时：只留闪烁光标，不画空气泡（否则就是一行空占位）。
+   ⚠ 选择器要压过 .msg.assistant .bubble（0,3,0），否则透明底/无边框不生效，仍是一个空方框。 */
+.msg .bubble.caret-only {
+  background: transparent; border-color: transparent;
+  padding: 0 2px; border-radius: 0; min-height: 0; width: auto;
+}
+
 .tool-row {
   flex: 1; min-width: 0; max-width: 100%;
   display: flex; gap: 8px; align-items: center;
