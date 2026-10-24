@@ -90,6 +90,10 @@ const state = {
   plan: null,
   /** 工作台子页状态：{key, data, loading} */
   wb: { key: '', data: null, loading: false },
+  /** 待发送的引用：{id, role, content} */
+  quote: null,
+  /** /fork 已提交但未落定（防重复点击） */
+  forkPending: false,
 };
 
 /** 上下文上限的可选档位（与本地约定一致）。 */
@@ -1959,6 +1963,10 @@ function msgHtml(m) {
   }
   const side = m.role === 'user' ? 'user' : (m.role === 'system' ? 'system' : 'assistant');
   const imgs = imagesHtml(m.images);
+  const quoteHtml = m.quote
+    ? '<div class="quote-ref"><span class="qr-label">' + esc(m.quote.role === 'user' ? '你' : '助手') + '：</span>' +
+      '<span class="qr-text">' + esc(String(m.quote.content || '').replace(/\s+/g, ' ').slice(0, 160)) + '</span></div>'
+    : '';
   const bodyHtml = String(m.content == null ? '' : m.content).trim() ? wrapOverflow(md(m.content)) : '';
   /**
    * 思考过程的显示策略（用户 2026-10-18 反馈：新版每条思考都留一块占位，一屏全是「▸ 思考过程」）：
@@ -1972,13 +1980,13 @@ function msgHtml(m) {
   }
   // 没有正文也没有图片（典型：思考结束后被"恢复"出来的空 assistant 消息）→ 整条不渲染。
   // 否则会留下「头像 + 空气泡 + 时间」这一行纯占位（用户报的第二个问题）。
-  if (!bodyHtml && !imgs) return '';
+  if (!bodyHtml && !imgs && !quoteHtml) return '';
   // system 消息不带头像（居中提示条）
   const lineInner = side === 'system'
     ? bodyHtml
     : (side === 'user' ? userAvatarHtml() : botAvatarHtml()) +
-      '<div class="bubble">' + (imgs + bodyHtml) + '</div>';
-  return extra + '<div class="msg ' + side + '">' +
+      '<div class="bubble">' + (quoteHtml + imgs + bodyHtml) + '</div>';
+  return extra + '<div class="msg ' + side + '" data-key="' + esc(m.key || '') + '">' +
     '<div class="msg-line">' + lineInner + '</div>' +
     (m.ts ? '<div class="msg-time">' + fmtTime(m.ts) + '</div>' : '') +
   '</div>';
@@ -2076,6 +2084,7 @@ function addMsg(m) {
   state.msgs.push({
     key: 'u' + Date.now() + Math.random().toString(36).slice(2, 5),
     role: m.role, content: m.content,
+    quote: m.quote || null,
     images: m.images || null,
     ts: m.ts || Date.now() / 1000,
   });
@@ -2607,6 +2616,7 @@ function sendMessage() {
 
   const sid = state.cur;
   const busy = !!pending.length;
+  const myQuote = state.quote;
   // 会话还在跑（本地流式 / 服务端忙）→ 这条会被服务端排队：只进排队区，
   // **不进已发送消息流**，否则同一句话会同时以「排队中」和「已发送」出现。
   const live = !!state.working[sid] || !!(state.streaming && state.streaming.sid === sid);
@@ -2623,7 +2633,7 @@ function sendMessage() {
   if (live) {
     state.queued.push({
       id: queueId, role: 'user', content: text, images: renderables,
-      ts: Date.now() / 1000, queued: true,
+      quote: myQuote, ts: Date.now() / 1000, queued: true,
     });
     renderMsgs();
     jumpToLatest();
@@ -2631,6 +2641,7 @@ function sendMessage() {
     addMsg({
       role: 'user',
       content: text,
+      quote: myQuote,
       images: renderables,
     });
   }
@@ -2641,6 +2652,7 @@ function sendMessage() {
   const myAttachments = pending.slice();
   pending = [];
   renderAttachments();
+  clearQuote();
 
   if (!live) {
     markWorking(sid, true);
@@ -2653,7 +2665,7 @@ function sendMessage() {
   }
 
   // 图片还没传完就等一下；失败则退化成纯文本并提示
-  buildAndSend(sid, text, myAttachments, queueId);
+  buildAndSend(sid, text, myAttachments, queueId, myQuote);
   loadSessionsSoon();
   // 新会话的标题取第一条**真正发出**的消息；排队中的那条不能抢标题（用户 2026-10-05 截图发现）
   if (!live && !state.sessions.find((x) => x.id === sid)) {
@@ -2663,7 +2675,7 @@ function sendMessage() {
 }
 
 /** 等附件上传完成，组装 ContentBlock[] 后 emit run。 */
-async function buildAndSend(sid, text, attachments, queueId) {
+async function buildAndSend(sid, text, attachments, queueId, quote) {
   // 对这些附件补齐上传状态
   await uploadAttachmentsFor(attachments);
   const failed = attachments.filter((a) => a.err);
@@ -2674,7 +2686,8 @@ async function buildAndSend(sid, text, attachments, queueId) {
   }
 
   const blocks = [];
-  if (text.trim()) blocks.push({ type: 'text', text: text.trim() });
+  const outgoing = quote ? formatQuoted(quote, text) : text;
+  if (outgoing.trim()) blocks.push({ type: 'text', text: outgoing.trim() });
   // ContentBlock：图片 → image；其他 → file（与服务端/web 端一致）
   for (const a of ready) {
     blocks.push({
@@ -3099,8 +3112,9 @@ function bind() {
   $('lightbox').addEventListener('click', (e) => {
     if (e.target === $('lightbox') || e.target.closest('#lightbox-close')) closeLightbox();
   });
-  // 长按气泡复制文本（WebView 里 navigator.clipboard 常不可用 → 优先原生桥）
-  bindLongPressCopy($('msg-list'));
+  // 长按消息 → 操作菜单（复制 / 引用 / 朗读 / Fork）
+  bindMessageActions($('msg-list'));
+  $('quote-cancel').addEventListener('click', () => clearQuote());
 
   $('chat-stop').addEventListener('click', stopRun);
   $('chat-input').addEventListener('input', (e) => autoGrow(e.target));
@@ -3941,6 +3955,168 @@ async function wbShowLogFile(name, level) {
   } catch (e) {
     wbError(e);
   }
+}
+
+/* ============================== 消息操作（复制 / 引用 / 朗读 / Fork） ============================== */
+
+/** 朗读状态（同一时刻只读一条）。 */
+const speechState = { key: '' };
+
+/**
+ * 把引用拼成服务端认识的 quoted_message 块。
+ * 与 web 的 formatMessageWithReference 完全一致：
+ *   <quoted_message sender="user|assistant">
+内容
+</quoted_message>
+
+正文
+ */
+function formatQuoted(quote, text) {
+  if (!quote) return String(text || '');
+  const NL = String.fromCharCode(10);
+  const sender = quote.role === 'user' ? 'user' : 'assistant';
+  const body = String(quote.content || '').trim();
+  const reply = String(text || '').trim();
+  const block = '<quoted_message sender="' + sender + '">' + NL + body + NL + '</quoted_message>';
+  return reply ? block + NL + NL + reply : block;
+}
+
+function renderQuoteBar() {
+  const bar = $('quote-bar');
+  if (!bar) return;
+  const q = state.quote;
+  if (!q) { bar.classList.add('hidden'); return; }
+  const el = $('quote-text');
+  if (el) el.textContent = String(q.content || '').replace(/\s+/g, ' ').slice(0, 90);
+  bar.classList.remove('hidden');
+}
+
+function setQuote(m) {
+  state.quote = { id: m.key, role: m.role, content: String(m.content || '') };
+  renderQuoteBar();
+  try { $('chat-input').focus(); } catch (e) {}
+  toast('已引用，输入内容后发送');
+}
+
+function clearQuote() {
+  state.quote = null;
+  renderQuoteBar();
+}
+
+function messageByKey(key) {
+  return (state.msgs || []).find((m) => String(m.key) === String(key)) || null;
+}
+
+/** 长按消息 → 操作菜单。 */
+async function openMessageActions(key) {
+  const m = messageByKey(key);
+  if (!m) return;
+  const isAssistant = m.role === 'assistant';
+  const text = String(m.content || '').trim();
+  const rows = [{ key: 'copy', label: '复制' }];
+  if (text && (m.role === 'user' || isAssistant)) rows.push({ key: 'quote', label: '引用' });
+  if (text && isAssistant) {
+    rows.push({ key: speechState.key === key ? 'stop-speak' : 'speak', label: speechState.key === key ? '停止朗读' : '朗读' });
+    rows.push({ key: 'fork', label: 'Fork 当前会话', note: '从会话尾部新建分支' });
+  }
+  const act = await actionSheet('消息操作', rows);
+  if (act === 'copy') {
+    if (copyText(text)) toast('已复制');
+    else toast('复制失败，请手动选择文字');
+    return;
+  }
+  if (act === 'quote') { setQuote(m); return; }
+  if (act === 'speak') { speakText(text, key); return; }
+  if (act === 'stop-speak') { speakText(text, key); return; }
+  if (act === 'fork') { forkSessionFlow(); }
+}
+
+/** 系统 TTS 朗读（WebView 的 speechSynthesis，不需要服务端配置）。 */
+function speakText(text, key) {
+  const raw = String(text || '');
+  if (!raw) return;
+  if (!('speechSynthesis' in window)) { toast('当前系统不支持朗读'); return; }
+  const synth = window.speechSynthesis;
+  // 再点一次：停止
+  if (speechState.key === key && (synth.speaking || synth.pending)) {
+    synth.cancel();
+    speechState.key = '';
+    toast('已停止朗读');
+    return;
+  }
+  synth.cancel();
+  // 代码块朗读没意义，压成一句提示
+  const spoken = raw.replace(/```[\s\S]*?```/g, '（代码块）').replace(/\s+/g, ' ').trim().slice(0, 3000);
+  if (!spoken) return;
+  const utter = new SpeechSynthesisUtterance(spoken);
+  utter.lang = /[一-龥]/.test(spoken) ? 'zh-CN' : 'en-US';
+  utter.rate = 1;
+  utter.onend = () => { if (speechState.key === key) speechState.key = ''; };
+  speechState.key = key;
+  synth.speak(utter);
+  toast('正在朗读…');
+}
+
+/** Fork 当前会话：服务端 slash command `/fork`（从会话尾部新建分支，原会话不变）。 */
+async function forkSessionFlow() {
+  if (state.forkPending) { toast('Fork 请求处理中…'); return; }
+  if (!state.cur) { toast('先打开一个会话'); return; }
+  if (state.curHermes) { toast('企微历史会话不支持 Fork'); return; }
+  if (!state.socket || !state.socket.connected) { toast('连接已断开，正在重连…'); connectSocket(); return; }
+  const ok = await confirmDialog('Fork 当前会话？', '会从当前会话尾部新建一个分支会话，原会话保持不变。');
+  if (!ok) return;
+  state.forkPending = true;
+  try {
+    state.socket.emit('run', {
+      session_id: state.cur,
+      profile: state.profile,
+      input: '/fork',
+      queue_id: 'q' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5),
+    });
+    toast('已请求 Fork');
+    setTimeout(() => { state.forkPending = false; loadSessions(); }, 3000);
+  } catch (e) {
+    state.forkPending = false;
+    toast('Fork 失败：' + ((e && e.message) || e));
+  }
+}
+
+/** 长按消息绑定（550ms / 位移 12px 取消；桌面右键同效）。 */
+function bindMessageActions(root) {
+  let timer = null;
+  let sx = 0;
+  let sy = 0;
+  let key = '';
+  const clear = () => { if (timer) { clearTimeout(timer); timer = null; } key = ''; };
+  root.addEventListener('touchstart', (e) => {
+    const p = (e.touches && e.touches[0]) || e;
+    const msg = e.target && e.target.closest ? e.target.closest('.msg[data-key]') : null;
+    if (!msg) return;
+    const k = msg.getAttribute('data-key');
+    if (!k) return;
+    key = k;
+    sx = p.clientX; sy = p.clientY;
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      timer = null;
+      const target = key;
+      key = '';
+      if (target) openMessageActions(target);
+    }, 550);
+  }, { passive: true });
+  root.addEventListener('touchmove', (e) => {
+    const p = (e.touches && e.touches[0]) || e;
+    if (Math.abs(p.clientX - sx) > 12 || Math.abs(p.clientY - sy) > 12) clear();
+  }, { passive: true });
+  root.addEventListener('touchend', clear);
+  root.addEventListener('touchcancel', clear);
+  root.addEventListener('contextmenu', (e) => {
+    const msg = e.target && e.target.closest ? e.target.closest('.msg[data-key]') : null;
+    if (!msg) return;
+    e.preventDefault();
+    const k = msg.getAttribute('data-key');
+    if (k) openMessageActions(k);
+  });
 }
 
 /* ============================== 启动 ============================== */

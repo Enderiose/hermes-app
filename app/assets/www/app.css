@@ -996,3 +996,36 @@ html, body {
 .log-line.lv-warn .log-lv { color: #f9c33c; }
 .log-line.lv-error .log-lv { color: var(--danger); }
 .log-msg { margin-top: 3px; white-space: pre-wrap; word-break: break-word; }
+
+/* ---------- 消息引用 ---------- */
+.quote-bar {
+  flex: 0 0 auto; display: flex; align-items: center; gap: 8px;
+  padding: 8px 12px;
+  background: var(--panel2); border-top: 1px solid var(--line);
+}
+.quote-main { flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 6px; }
+.quote-label {
+  flex: 0 0 auto; font-size: 10.5px; color: var(--accent);
+  border: 1px solid var(--accent); border-radius: 6px; padding: 0 5px;
+}
+.quote-text {
+  flex: 1; min-width: 0; font-size: 11.5px; color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.quote-x {
+  flex: 0 0 auto; width: 26px; height: 26px; border-radius: 13px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: transparent; color: var(--muted); border: 1px solid var(--line);
+}
+.quote-x .ico { width: 13px; height: 13px; }
+
+/* 气泡里的引用块 */
+.quote-ref {
+  margin: 0 0 6px; padding: 6px 8px;
+  border-left: 3px solid var(--accent);
+  background: rgba(79, 140, 255, .08);
+  border-radius: 6px; font-size: 11.5px; color: var(--muted);
+  max-height: 92px; overflow: hidden;
+}
+.quote-ref .qr-label { color: var(--accent); }
+.quote-ref .qr-text { word-break: break-word; }

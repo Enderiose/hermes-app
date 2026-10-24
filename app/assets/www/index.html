@@ -214,6 +214,14 @@
       </div>
       <div id="msg-list" class="msgs"></div>
       <div id="chat-cards"></div>
+      <!-- 引用条（长按消息 → 引用；发送时拼成 <quoted_message> 块） -->
+      <div id="quote-bar" class="quote-bar hidden">
+        <div class="quote-main">
+          <span class="quote-label">引用</span>
+          <span id="quote-text" class="quote-text"></span>
+        </div>
+        <button id="quote-cancel" class="quote-x" title="取消引用"><svg class="ico"><use href="#i-x"/></svg></button>
+      </div>
       <!-- 待发送附件（图片预览 / 文件卡片），贴在输入框上方 -->
       <div id="attach-bar" class="attach-bar hidden">
         <div id="attach-list" class="attach-list"></div>
