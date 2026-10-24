@@ -26,6 +26,12 @@ const state = {
   user: localStorage.getItem('hm_user') || '',
   profile: localStorage.getItem('hm_profile') || 'enderiose',
   profiles: safeJson(localStorage.getItem('hm_profiles'), []),
+  /** 连过的自建 Studio：[{base,name,version,machineId,lastUser,lastUsed}] */
+  studios: safeJson(localStorage.getItem('hm_studios'), []),
+  /** 当前 Studio 探测结果（GET /api/devices/link-info） */
+  studio: { version: '', machineId: '', checked: false },
+  /** 外观：auto | dark | light */
+  theme: localStorage.getItem('hm_theme') || 'auto',
   view: 'login',
   sessions: [],
   wecom: [],
@@ -80,6 +86,10 @@ const state = {
   lastHistoryRun: '',
   /** 最近一次收到 socket 事件的时间（看门狗判断事件是否静默丢失） */
   lastEventAt: 0,
+  /** 任务计划快照（plan.updated），与当前会话绑定 */
+  plan: null,
+  /** 工作台子页状态：{key, data, loading} */
+  wb: { key: '', data: null, loading: false },
 };
 
 /** 上下文上限的可选档位（与本地约定一致）。 */
@@ -154,6 +164,130 @@ async function api(path, opts = {}) {
     throw err;
   }
   return data;
+}
+
+/* ============================== Studio（自建服务端） ============================== */
+
+/** 本客户端要求的最低 Studio（hermes-web-ui）版本。低于此版本协议字段不完整。 */
+const MIN_STUDIO_VERSION = '0.7.13';
+
+/** 版本比较：a>b 返回 1，a<b 返回 -1，相等 0；无法解析返回 null。 */
+function cmpVersion(a, b) {
+  const parse = (v) => {
+    const m = String(v || '').trim().match(/^[vV]?(\d+)\.(\d+)\.(\d+)/);
+    return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+  };
+  const x = parse(a), y = parse(b);
+  if (!x || !y) return null;
+  for (let i = 0; i < 3; i++) {
+    if (x[i] !== y[i]) return x[i] > y[i] ? 1 : -1;
+  }
+  return 0;
+}
+
+/** 版本是否满足最低要求；拿不到版本时按「未知但不阻断」处理。 */
+function studioVersionOk(v) {
+  if (!v) return true;
+  const c = cmpVersion(v, MIN_STUDIO_VERSION);
+  return c == null ? true : c >= 0;
+}
+
+function normalizeBase(url) {
+  return String(url || '').trim().replace(/\/+$/, '');
+}
+
+/**
+ * 探测 Studio 版本/机器信息。
+ * 端点来自逆向（Ekko App 用同一个）：GET /api/devices/link-info → { hermes_web_ui_version }
+ * 该端点在某些老版本上可能 404/401 —— 拿不到就标记为未知，不阻断使用。
+ */
+async function probeStudio() {
+  try {
+    const info = await api('/api/devices/link-info', { noProfileHeader: true });
+    state.studio = {
+      version: String((info && info.hermes_web_ui_version) || '').trim(),
+      machineId: String((info && (info.machine_id || info.machineId || info.machine)) || '').trim(),
+      checked: true,
+    };
+  } catch (e) {
+    state.studio = { version: state.studio.version || '', machineId: state.studio.machineId || '', checked: false };
+  }
+  rememberStudio();
+  renderStudioList();
+  renderSettings();
+  return state.studio;
+}
+
+/** 把当前 base/版本写回「连过的 Studio」列表（最多 8 条）。 */
+function rememberStudio() {
+  const base = normalizeBase(state.base);
+  if (!base || !/^https?:\/\//i.test(base)) return;
+  const list = (state.studios || []).filter((s) => normalizeBase(s.base) !== base);
+  list.unshift({
+    base: base,
+    version: state.studio.version || '',
+    machineId: state.studio.machineId || '',
+    lastUser: state.user || '',
+    lastUsed: Date.now(),
+  });
+  state.studios = list.slice(0, 8);
+  try { localStorage.setItem('hm_studios', JSON.stringify(state.studios)); } catch (e) {}
+}
+
+function forgetStudio(base) {
+  const b = normalizeBase(base);
+  state.studios = (state.studios || []).filter((s) => normalizeBase(s.base) !== b);
+  try { localStorage.setItem('hm_studios', JSON.stringify(state.studios)); } catch (e) {}
+  renderStudioList();
+}
+
+/** 登录页的「连过的 Studio」卡片。点一下填入地址（切 origin 需重新登录）。 */
+function renderStudioList() {
+  const box = $('studio-list');
+  if (!box) return;
+  const cur = normalizeBase(state.base);
+  const list = (state.studios || []).slice(0, 4);
+  if (!list.length) { box.innerHTML = ''; return; }
+  box.innerHTML = list.map((s, i) => {
+    const active = normalizeBase(s.base) === cur;
+    const ver = s.version ? ('v' + s.version) : '版本未知';
+    return '<button class="studio-card' + (active ? ' active' : '') + '" data-i="' + i + '">' +
+      '<span class="sc-main">' +
+        '<span class="sc-base">' + esc(s.base.replace(/^https?:\/\//, '')) + '</span>' +
+        '<span class="sc-meta">' + esc(ver) + (s.lastUser ? ' · ' + esc(s.lastUser) : '') + '</span>' +
+      '</span>' +
+      (active ? '<span class="sc-badge">当前</span>' : '<span class="sc-go">连接</span>') +
+    '</button>';
+  }).join('');
+  box.querySelectorAll('.studio-card').forEach((b) => {
+    b.addEventListener('click', () => {
+      const s = list[Number(b.getAttribute('data-i'))];
+      if (!s) return;
+      $('login-base').value = s.base;
+      if (s.lastUser) $('login-user').value = s.lastUser;
+      if (normalizeBase(s.base) !== normalizeBase(nativeBase())) {
+        toast('将切换到 ' + s.base + '，登录后页面会重载');
+      }
+      try { $('login-pass').focus(); } catch (e) {}
+    });
+  });
+}
+
+/* ============================== 外观 ============================== */
+
+function applyTheme() {
+  const t = ['auto', 'dark', 'light'].includes(state.theme) ? state.theme : 'auto';
+  state.theme = t;
+  document.documentElement.setAttribute('data-theme', t);
+  document.querySelectorAll('#theme-seg .seg-item').forEach((b) => {
+    b.classList.toggle('active', b.getAttribute('data-theme') === t);
+  });
+}
+
+function setTheme(t) {
+  state.theme = t;
+  try { localStorage.setItem('hm_theme', t); } catch (e) {}
+  applyTheme();
 }
 
 /* ============================== Markdown-lite ============================== */
@@ -322,21 +456,26 @@ function stopThinkingTimer() {
 /* ============================== 视图切换 ============================== */
 function show(view) {
   state.view = view;
-  for (const v of ['login', 'sessions', 'wecom', 'settings', 'chat']) {
-    $('view-' + v).classList.toggle('hidden', v !== view);
+  for (const v of ['login', 'sessions', 'wecom', 'settings', 'chat', 'workbench']) {
+    const el = $('view-' + v);
+    if (el) el.classList.toggle('hidden', v !== view);
   }
+  if (view === 'login') renderStudioList();
   if (view === 'settings') renderSettings();
+  if (view === 'workbench') renderWorkbench();
 }
 
 function switchTab(tab) {
   if (tab === 'sessions') { show('sessions'); loadSessions(); }
   else if (tab === 'wecom') { show('wecom'); loadWecom(); }
+  else if (tab === 'workbench') { show('workbench'); renderWorkbench(); }
   else if (tab === 'settings') show('settings');
 }
 
 window.__onBack = function () {
+  if (state.wb && state.wb.key && !$('wb-sheet').classList.contains('hidden')) { wbClose(); return true; }
   if (state.view === 'chat') { closeChat(); return true; }
-  if (state.view === 'wecom' || state.view === 'settings') { switchTab('sessions'); return true; }
+  if (state.view === 'wecom' || state.view === 'settings' || state.view === 'workbench') { switchTab('sessions'); return true; }
   if (state.searchMode) { toggleSearch(false); return true; }
   return false;
 };
@@ -379,6 +518,16 @@ async function doLogin() {
     localStorage.setItem('hm_profile', state.profile);
     localStorage.setItem('hm_profiles', JSON.stringify(state.profiles));
     $('login-pass').value = '';
+    rememberStudio();
+    // 探测 Studio 版本：低于 0.7.13 时协议字段不全（Ekko App 也直接拒绝）
+    await probeStudio();
+    if (state.studio.version && !studioVersionOk(state.studio.version)) {
+      state.token = '';
+      localStorage.removeItem('hm_token');
+      errEl.textContent = 'Studio 版本过低：v' + state.studio.version +
+        '，本客户端要求 ≥ ' + MIN_STUDIO_VERSION + '。请先升级 Studio（Web 版同一套升级方式）。';
+      return;
+    }
     connectSocket();
     loadAvatar();          // 登录后拉头像（失败不影响主流程）
     switchTab('sessions');
@@ -402,6 +551,7 @@ function logout(expired) {
   if (state.socket) { try { state.socket.disconnect(); } catch (e) {} state.socket = null; }
   show('login');
   fillLogin();
+  renderStudioList();
   if (expired) $('login-error').textContent = '登录已过期，请重新登录';
 }
 
@@ -557,6 +707,19 @@ function connectSocket() {
       stopThinkingTimer();
       updateChatSub(subLine(state.curModel));
       loadContextUsage();     // 一轮跑完，用量变了
+      // 本轮文件变更卡（web 的 WorkspaceRunChangeSummary）
+      const change = ev.workspace_run_change;
+      if (change && Number(change.files_changed) > 0) {
+        state.cards.push({
+          kind: 'diff',
+          id: 'diff-' + (change.change_id || Date.now()),
+          sid: ev.session_id,
+          change: change,
+        });
+        renderCards();
+      }
+      state.plan = null;      // 一轮结束，计划卡由新一次 plan.updated 重建
+      renderCards();
     }
     loadSessionsSoon();
   });
@@ -638,6 +801,29 @@ function connectSocket() {
       if (!already) addMsg({ role: 'user', content: m.content, ts: m.timestamp });
     }
     loadSessionsSoon();
+  });
+
+  // ---- 任务计划 / 压缩 / 命令回显（对齐 web 的事件语义）----
+  on('plan.updated', (ev) => {
+    if (!ev || ev.session_id !== state.cur) return;
+    state.plan = ev;
+    renderCards();
+  });
+  on('compression.started', (ev) => {
+    if (state.cur !== ev.session_id) return;
+    addMsg({ role: 'system', content: '正在压缩上下文…' });
+  });
+  on('compression.completed', (ev) => {
+    if (state.cur !== ev.session_id) return;
+    const before = Number(ev.beforeTokens || ev.before_tokens || 0);
+    const after = Number(ev.afterTokens || ev.after_tokens || 0);
+    const detail = before && after ? '（' + fmtTokens(before) + ' → ' + fmtTokens(after) + '）' : '';
+    addMsg({ role: 'system', content: '上下文压缩完成' + detail });
+  });
+  on('session.command', (ev) => {
+    if (state.cur !== ev.session_id) return;
+    const cmd = ev.command || ev.text || ev.name || '';
+    if (cmd) addMsg({ role: 'system', content: '⌘ ' + String(cmd).slice(0, 200) });
   });
 
   // ---- 审批 / 追问 ----
@@ -1014,15 +1200,25 @@ async function openCategoryManager() {
   await openCategoryActions(Number(key.slice(1)));
 }
 
-/** 会话行菜单（⋯ / 长按）：移动分类、打开。 */
+/** 会话行菜单（⋯ / 长按）：打开、重命名、置顶、分类、归档、删除。 */
 async function openSessionMenu(sid) {
   const s = (state.sessions || []).find((x) => x.id === sid);
   if (!s) return;
+  const pinned = !!(s.is_pinned === true || s.is_pinned === 1);
+  const archived = !!(s.is_archived === true || s.is_archived === 1);
   const key = await actionSheet(s.title || '（未命名会话）', [
-    { key: 'cat', label: '移动到分类', note: (s.category_id != null && categoryName(s.category_id)) || '未分类' },
     { key: 'open', label: '打开会话' },
+    { key: 'rename', label: '重命名' },
+    { key: 'pin', label: pinned ? '取消置顶' : '置顶', active: pinned },
+    { key: 'cat', label: '移动到分类', note: (s.category_id != null && categoryName(s.category_id)) || '未分类' },
+    { key: 'archive', label: archived ? '取消归档' : '归档' },
+    { key: 'delete', label: '删除会话', note: '不可恢复', danger: true },
   ]);
   if (key === 'open') { openSession(sid, s.title || '', false, s.model || ''); return; }
+  if (key === 'rename') { renameSessionFlow(s); return; }
+  if (key === 'pin') { togglePinSession(s, !pinned); return; }
+  if (key === 'archive') { archiveSessionFlow(s, !archived); return; }
+  if (key === 'delete') { deleteSessionFlow(s); return; }
   if (key !== 'cat') return;
   const id = await pickCategory('移动到分类');
   if (id === undefined) return;
@@ -1034,6 +1230,72 @@ async function openSessionMenu(sid) {
     updateCatChip();
     toast(id == null ? '已移到「未分类」' : '已移到「' + categoryName(id) + '」');
   } catch (e) { toast('移动失败：' + e.message); }
+}
+
+/** 重命名会话（POST /api/studio/sessions/:id/rename）。 */
+async function renameSessionFlow(s) {
+  const next = await promptDialog('重命名会话', s.title || '', '会话标题');
+  if (!next || next === s.title) return;
+  try {
+    await api('/api/studio/sessions/' + encodeURIComponent(s.id) + '/rename',
+      { method: 'POST', body: { title: next } });
+    s.title = next;
+    if (state.cur === s.id) {
+      state.curTitle = next;
+      $('chat-title').textContent = next;
+    }
+    renderSessions();
+    toast('已重命名');
+  } catch (e) {
+    toast('重命名失败：' + ((e && e.message) || e));
+  }
+}
+
+/** 置顶 / 取消置顶（POST /api/studio/sessions/:id/pin）。 */
+async function togglePinSession(s, pin) {
+  try {
+    await api('/api/studio/sessions/' + encodeURIComponent(s.id) + '/pin',
+      { method: 'POST', body: { is_pinned: pin } });
+    s.is_pinned = pin ? 1 : 0;
+    renderSessions();
+    toast(pin ? '已置顶' : '已取消置顶');
+  } catch (e) {
+    toast('操作失败：' + ((e && e.message) || e));
+  }
+}
+
+/** 归档 / 取消归档（POST /api/studio/sessions/:id/(un)archive）。 */
+async function archiveSessionFlow(s, archive) {
+  try {
+    await api('/api/studio/sessions/' + encodeURIComponent(s.id) + (archive ? '/archive' : '/unarchive'),
+      { method: 'POST' });
+    if (archive) {
+      state.sessions = (state.sessions || []).filter((x) => x.id !== s.id);
+    } else {
+      s.is_archived = 0;
+    }
+    renderSessions();
+    toast(archive ? '已归档' : '已取消归档');
+  } catch (e) {
+    toast('操作失败：' + ((e && e.message) || e));
+  }
+}
+
+/** 删除会话（DELETE /api/studio/sessions/:id?profile=）。 */
+async function deleteSessionFlow(s) {
+  const ok = await confirmDialog('删除会话「' + (s.title || '未命名') + '」？',
+    '会话与消息会从 Studio 里删除，无法恢复（企微历史会话同理）。');
+  if (!ok) return;
+  try {
+    await api('/api/studio/sessions/' + encodeURIComponent(s.id) +
+      '?profile=' + encodeURIComponent(state.profile), { method: 'DELETE' });
+    state.sessions = (state.sessions || []).filter((x) => x.id !== s.id);
+    if (state.cur === s.id) closeChat();
+    renderSessions();
+    toast('已删除');
+  } catch (e) {
+    toast('删除失败：' + ((e && e.message) || e));
+  }
 }
 
 /** 当前会话该显示的分类 id（新会话取待定值，老会话取服务端归属）。 */
@@ -1049,7 +1311,15 @@ function updateCatChip() {
   const btn = $('chat-cat');
   if (!btn) return;
   btn.classList.toggle('hidden', !!state.curHermes || !state.cur);
-  btn.textContent = '🏷 ' + (categoryName(chatCategoryId()) || '未分类');
+  setPillText(btn, categoryName(chatCategoryId()) || '未分类');
+}
+
+/** 顶栏 pill 的文案只改 <span>，不动 SVG 图标（textContent 会把 icon 一起清掉）。 */
+function setPillText(btn, text) {
+  if (!btn) return;
+  const span = btn.querySelector('span');
+  if (span) span.textContent = String(text == null ? '' : text);
+  else btn.textContent = String(text == null ? '' : text);
 }
 
 function renderCatSheet() {
@@ -1106,14 +1376,24 @@ async function openChatCatSheet() {
 
 function rowHtml(s, target, showCategory) {
   const working = state.working[s.id];
+  const isWecom = target === 'wecom-list';
   // 「最近」分组里补一个所属分类标签（web 的 resolveRecentSessionCategoryLabel）
   const catName = showCategory
     ? ((s.category_id != null && categoryName(s.category_id)) || '未分类')
     : '';
-  const canManage = target !== 'wecom-list';   // 企微会话只读，不给分类入口
-  return '<div class="row" data-id="' + esc(s.id) + '" data-hermes="' + (target === 'wecom-list' ? '1' : '') + '">' +
+  const canManage = !isWecom;   // 企微会话只读，不给分类入口
+  const title = s.title || '（未命名会话）';
+  const initial = String(title.trim()[0] || 'H').toUpperCase();
+  const avatar = isWecom
+    ? '<svg class="ico"><use href="#i-bot"/></svg>'
+    : esc(initial);
+  return '<div class="row" data-id="' + esc(s.id) + '" data-hermes="' + (isWecom ? '1' : '') + '">' +
+    '<div class="row-avatar' + (isWecom ? ' is-wecom' : '') + '">' + avatar + '</div>' +
     '<div class="row-main">' +
-      '<div class="row-title">' + esc(s.title || '（未命名会话）') + '</div>' +
+      '<div class="row-top">' +
+        '<span class="row-title">' + esc(title) + '</span>' +
+        '<span class="row-time">' + fmtTime(s.last_active || s.ended_at || s.started_at) + '</span>' +
+      '</div>' +
       '<div class="row-preview">' + esc(s.preview || '') + '</div>' +
       '<div class="row-meta">' +
         (working ? '<span class="chip working">● 运行中</span>' : '') +
@@ -1123,8 +1403,7 @@ function rowHtml(s, target, showCategory) {
         (s.source ? '<span class="chip">' + esc(s.source) + '</span>' : '') +
       '</div>' +
     '</div>' +
-    (canManage ? '<button class="row-more" title="更多">⋯</button>' : '') +
-    '<div class="row-time">' + fmtTime(s.last_active || s.ended_at || s.started_at) + '</div>' +
+    (canManage ? '<button class="row-more" title="更多"><svg class="ico"><use href="#i-more"/></svg></button>' : '') +
   '</div>';
 }
 
@@ -1640,15 +1919,28 @@ function cancelQueued(queueId) {
   }
 }
 
-/** 消息里的图片 HTML。优先用已上传 path（服务端），未上传完先用本地 blob 预览。 */
-function imagesHtml(images) {
-  if (!images || !images.length) return '';
-  return images.map((img) => {
-    const src = img.path ? imageSrcFor(img.path) : (img.localUrl || '');
-    if (!src) return '';
-    return '<div class="imgwrap"><img class="chat-img" alt="' + esc(img.name || '') + '" src="' + esc(src) + '"></div>';
+/** 消息里的附件 HTML：图片出图，其他文件出下载卡。 */
+function attachmentsHtml(items) {
+  if (!items || !items.length) return '';
+  return items.map((a) => {
+    const type = String(a.media_type || a.type || '');
+    const isImg = a.kind ? a.kind === 'image' : /^image\//.test(type);
+    if (isImg) {
+      const src = a.path ? imageSrcFor(a.path) : (a.localUrl || a.previewUrl || '');
+      if (!src) return '';
+      return '<div class="imgwrap"><img class="chat-img" alt="' + esc(a.name || '') + '" src="' + esc(src) + '"></div>';
+    }
+    const href = a.path ? fileDownloadUrl(a.path, a.name) : '';
+    if (!href) return '';
+    return '<a class="file-card" href="' + esc(href) + '" target="_blank" rel="noopener">' +
+      '<span class="fc-ico">' + fileIcon(a.name) + '</span>' +
+      '<span class="fc-main"><span class="fc-name">' + esc(a.name || '文件') + '</span>' +
+      '<span class="fc-meta">' + esc(type || '文件') + '</span></span>' +
+      '<span class="fc-dl">下载</span></a>';
   }).join('');
 }
+/** 旧名兼容（排队区/消息渲染处原先叫 imagesHtml）。 */
+const imagesHtml = attachmentsHtml;
 
 /** 思考结束后的处理：'hide' = 直接隐藏（不占位，默认）｜'line' = 单行折叠条 */
 const DONE_REASONING = 'hide';
@@ -1956,11 +2248,48 @@ function fileDownloadUrl(path, name) {
   return base + '/api/studio/files/download?' + params.toString();
 }
 
-/* ============================== 图片附件 ============================== */
-const MAX_IMAGE_BYTES = 20 * 1024 * 1024;   // 单张上限 20MB（服务端硬限 50MB）
+/* ============================== 附件（照片 / 拍摄 / 文件） ============================== */
+const MAX_IMAGE_BYTES = 20 * 1024 * 1024;   // 单张图片上限（服务端硬限 50MB）
+const MAX_FILE_BYTES = 50 * 1024 * 1024;    // 其他文件上限
 
-/** 当前待发送的附件：[{id, name, type, file, previewUrl, uploaded:{name,path}|null, err}] */
+/** 当前待发送的附件：[{id,kind:'image'|'file',name,type,size,file,previewUrl,uploaded,err}] */
 let pending = [];
+
+function fileSizeText(n) {
+  const v = Number(n) || 0;
+  if (v >= 1024 * 1024) return (v / 1024 / 1024).toFixed(1) + ' MB';
+  if (v >= 1024) return (v / 1024).toFixed(0) + ' KB';
+  return v + ' B';
+}
+
+/** 文件类型图标（用 emoji，不依赖图标资源）。 */
+function fileIcon(name) {
+  const ext = String(name || '').toLowerCase().split('.').pop();
+  if (['png', 'jpg', 'jpeg', 'webp', 'gif', 'heic', 'bmp'].includes(ext)) return '🖼';
+  if (ext === 'pdf') return '📕';
+  if (['doc', 'docx'].includes(ext)) return '📘';
+  if (['xls', 'xlsx', 'csv'].includes(ext)) return '📗';
+  if (['ppt', 'pptx'].includes(ext)) return '📙';
+  if (['zip', 'rar', '7z', 'tar', 'gz'].includes(ext)) return '🗜';
+  if (['mp3', 'wav', 'm4a', 'ogg', 'flac'].includes(ext)) return '🎵';
+  if (['mp4', 'mov', 'mkv', 'webm'].includes(ext)) return '🎬';
+  if (['js', 'ts', 'py', 'java', 'go', 'rs', 'c', 'cpp', 'sh', 'json', 'yml', 'yaml', 'toml', 'xml', 'html', 'css', 'md', 'txt'].includes(ext)) return '📄';
+  return '📎';
+}
+
+/** 按文件名推断 MIME（相册/相机返回的 File 有时 type 为空）。 */
+function guessMime(name, fallback) {
+  const ext = String(name || '').toLowerCase().split('.').pop();
+  const map = {
+    png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp',
+    gif: 'image/gif', heic: 'image/heic', bmp: 'image/bmp',
+    pdf: 'application/pdf', txt: 'text/plain', md: 'text/markdown',
+    json: 'application/json', csv: 'text/csv', zip: 'application/zip',
+    mp3: 'audio/mpeg', m4a: 'audio/mp4', wav: 'audio/wav',
+    mp4: 'video/mp4', mov: 'video/quicktime',
+  };
+  return map[ext] || fallback || 'application/octet-stream';
+}
 
 function renderAttachments() {
   const bar = $('attach-bar');
@@ -1972,10 +2301,15 @@ function renderAttachments() {
   }
   bar.classList.remove('hidden');
   list.innerHTML = pending.map((a) => {
-    const status = a.err ? '<div class="up">失败</div>'
-      : (a.uploaded ? '' : '<div class="up">上传中…</div>');
-    return '<div class="att">' +
-      '<img alt="" src="' + esc(a.previewUrl) + '">' + status +
+    const status = a.err ? '<div class="up err">失败</div>'
+      : (a.uploaded ? '' : '<div class="up">待上传</div>');
+    const isImg = a.kind === 'image';
+    const inner = isImg
+      ? '<img alt="" src="' + esc(a.previewUrl) + '">'
+      : '<div class="af-ico">' + fileIcon(a.name) + '</div>';
+    return '<div class="att' + (isImg ? '' : ' att-file') + '">' + inner + status +
+      (isImg ? '' : '<div class="af-name">' + esc(a.name) + '</div>' +
+        '<div class="af-size">' + fileSizeText(a.size) + '</div>') +
       '<button class="rm" data-id="' + esc(a.id) + '" title="移除">×</button>' +
     '</div>';
   }).join('');
@@ -2058,27 +2392,56 @@ async function handlePaste(e) {
 }
 
 function pickImages() {
-  const el = $('img-picker');
-  if (el) { el.value = ''; el.click(); }
+  triggerPicker('photo');
 }
 
+/** 打开附件面板（Ekko 式：照片 / 拍摄 / 文件）。 */
+function openAttachPanel() {
+  const p = $('attach-panel');
+  if (p) p.classList.remove('hidden');
+}
+function closeAttachPanel() {
+  const p = $('attach-panel');
+  if (p) p.classList.add('hidden');
+}
+
+/** 按类型触发对应的 <input type=file>（实际弹窗由原生 onShowFileChooser 接管）。 */
+function triggerPicker(kind) {
+  closeAttachPanel();
+  const id = kind === 'camera' ? 'pick-camera' : (kind === 'file' ? 'pick-file' : 'pick-photo');
+  const el = $(id);
+  if (!el) return;
+  el.value = '';
+  el.click();
+}
+
+/**
+ * 收下用户选好的文件（照片/相机/文件共用）。
+ * Ekko 版语义：图片是 image block，其他文件是 file block（见 ContentBlock）。
+ */
 function onFilesPicked(fileList) {
   const files = Array.prototype.slice.call(fileList || []);
   let skipped = 0;
   for (const f of files) {
-    if (!/^image\//.test(f.type)) { skipped++; continue; }
-    if (f.size > MAX_IMAGE_BYTES) { skipped++; continue; }
+    const type = guessMime(f.name, f.type);
+    const isImg = /^image\//.test(type);
+    const limit = isImg ? MAX_IMAGE_BYTES : MAX_FILE_BYTES;
+    if (!f.size || f.size > limit) { skipped++; continue; }
     pending.push({
       id: 'a' + Date.now() + Math.random().toString(36).slice(2, 6),
-      name: f.name || ('image-' + Date.now() + '.png'),
-      type: f.type || 'image/png',
+      kind: isImg ? 'image' : 'file',
+      name: f.name || ((isImg ? 'image-' : 'file-') + Date.now()),
+      type: type,
+      size: f.size,
       file: f,
-      previewUrl: URL.createObjectURL(f),
+      previewUrl: isImg ? URL.createObjectURL(f) : '',
       uploaded: null,
       err: null,
     });
   }
-  if (skipped) toast('已跳过 ' + skipped + ' 个文件（仅支持 ≤20MB 的图片）');
+  if (skipped) {
+    toast('已跳过 ' + skipped + ' 个文件（图片 ≤20MB，其他 ≤50MB）');
+  }
   if (pending.length) {
     renderAttachments();
     // 真正上传在 buildAndSend 里做（那时才有目标会话），这里只出预览
@@ -2249,8 +2612,9 @@ function sendMessage() {
   const live = !!state.working[sid] || !!(state.streaming && state.streaming.sid === sid);
   const queueId = 'q' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 
-  // 先把消息画出来（含图片），不等上传返回
+  // 先把消息画出来（含附件），不等上传返回
   const renderables = pending.map((a) => ({
+    kind: a.kind,
     name: a.name,
     path: a.uploaded ? a.uploaded.path : '',
     media_type: a.type,
@@ -2283,7 +2647,7 @@ function sendMessage() {
     startStream(sid);
     jumpToLatest();          // 自己发言后必定定位到底部
     startThinkingAt(0);          // 本地发起即起计时，run.started 到达后会校准
-    if (busy) updateChatSub('图片上传中…');
+    if (busy) updateChatSub('附件上传中…');
   } else {
     updateChatSub('排队中…（' + state.queued.length + '）');
   }
@@ -2293,7 +2657,7 @@ function sendMessage() {
   loadSessionsSoon();
   // 新会话的标题取第一条**真正发出**的消息；排队中的那条不能抢标题（用户 2026-10-05 截图发现）
   if (!live && !state.sessions.find((x) => x.id === sid)) {
-    state.curTitle = (text || '（图片）').slice(0, 24);
+    state.curTitle = (text || '（附件）').slice(0, 24);
     $('chat-title').textContent = state.curTitle + '…';
   }
 }
@@ -2306,14 +2670,15 @@ async function buildAndSend(sid, text, attachments, queueId) {
   const ready = attachments.filter((a) => a.uploaded && !a.err);
 
   if (failed.length) {
-    toast(failed.length + ' 张图片上传失败：' + (failed[0].err || '').slice(0, 40));
+    toast(failed.length + ' 个附件上传失败：' + (failed[0].err || '').slice(0, 40));
   }
 
   const blocks = [];
   if (text.trim()) blocks.push({ type: 'text', text: text.trim() });
+  // ContentBlock：图片 → image；其他 → file（与服务端/web 端一致）
   for (const a of ready) {
     blocks.push({
-      type: 'image',
+      type: a.kind === 'file' ? 'file' : 'image',
       name: a.uploaded.name,
       path: a.uploaded.path,
       media_type: a.type,
@@ -2402,7 +2767,40 @@ function autoGrow(ta) {
 /* ---- 审批 / 追问卡片 ---- */
 function renderCards() {
   const el = $('chat-cards');
-  el.innerHTML = state.cards.map((c) => {
+  let html = '';
+
+  // 任务计划卡（plan.updated）：只在当前会话、且计划未结束时显示
+  const plan = state.plan;
+  if (plan && plan.session_id === state.cur && Array.isArray(plan.plan) && plan.plan.length) {
+    const steps = plan.plan.map((s) => {
+      const mark = s.status === 'completed' ? '✓' : (s.status === 'in_progress' ? '●' : '○');
+      const cls = s.status === 'completed' ? 'done' : (s.status === 'in_progress' ? 'doing' : 'todo');
+      return '<div class="plan-step ' + cls + '"><span class="ps-mark">' + mark + '</span>' +
+        '<span class="ps-text">' + esc(s.step) + '</span></div>';
+    }).join('');
+    const done = plan.plan.filter((s) => s.status === 'completed').length;
+    html += '<div class="card plan-card">' +
+      '<div class="card-title">🗒 任务计划 ' + done + '/' + plan.plan.length + '</div>' +
+      (plan.explanation ? '<div class="card-body">' + esc(plan.explanation) + '</div>' : '') +
+      '<div class="plan-steps">' + steps + '</div>' +
+    '</div>';
+  }
+
+  html += state.cards.map((c) => {
+    if (c.kind === 'diff') {
+      const ch = c.change || {};
+      const files = Array.isArray(ch.files) ? ch.files : [];
+      const shown = files.slice(0, 5).map((f) =>
+        '<div class="diff-file"><span class="df-name">' + esc(f.path || f.name || '') + '</span>' +
+        '<span class="df-stat">+' + Number(f.additions || 0) + ' −' + Number(f.deletions || 0) + '</span></div>').join('');
+      return '<div class="card diff-card" data-id="' + esc(c.id) + '">' +
+        '<div class="card-title">📝 本轮文件变更 · ' + Number(ch.files_changed || files.length) + ' 个文件</div>' +
+        '<div class="card-body">+' + Number(ch.additions || 0) + ' / −' + Number(ch.deletions || 0) +
+          (ch.truncated ? ' · 部分 diff 已截断' : '') + '</div>' +
+        (shown ? '<div class="diff-files">' + shown + '</div>' : '') +
+        '<div class="card-actions"><button data-act="dismiss-diff">知道了</button></div>' +
+      '</div>';
+    }
     if (c.kind === 'approval') {
       return '<div class="card" data-id="' + esc(c.id) + '">' +
         '<div class="card-title">🔐 ' + esc(c.title) + '</div>' +
@@ -2422,13 +2820,23 @@ function renderCards() {
     '</div>';
   }).join('');
 
+  el.innerHTML = html;
+
   el.querySelectorAll('.card').forEach((card) => {
     const id = card.getAttribute('data-id');
     const c = state.cards.find((x) => x.id === id);
-    if (!c) return;
+    if (!c) {
+      // 计划卡没有 data-id，不需要绑定
+      return;
+    }
     card.querySelectorAll('button').forEach((btn) => {
       btn.addEventListener('click', () => {
         const act = btn.getAttribute('data-act');
+        if (act === 'dismiss-diff') {
+          state.cards = state.cards.filter((x) => x.id !== id);
+          renderCards();
+          return;
+        }
         if (!state.socket) return;
         if (act === 'clarify-send') {
           const v = card.querySelector('[data-role="clarify-input"]').value.trim();
@@ -2504,7 +2912,7 @@ function renderModelSheet() {
  */
 async function applyModelChoice(provider, model, label) {
   state.chosenModel = { provider: provider || '', model: model };
-  $('chat-model').textContent = String(label || model).slice(0, 10);
+  setPillText($('chat-model'), String(label || model).slice(0, 12));
   closeModelSheet();           // 选完就收起（与之前行为一致）
   loadContextUsage();          // 换模型 → 上限会变
 
@@ -2582,9 +2990,21 @@ function renderSettings() {
   $('set-base').textContent = state.base;
   $('set-user').textContent = state.user;
   $('set-version').textContent = 'v' + APP_VERSION;
+  const sv = $('set-studio-ver');
+  if (sv) {
+    const ver = state.studio.version;
+    const bad = ver && !studioVersionOk(ver);
+    sv.textContent = ver ? ('v' + ver) : '未知';
+    sv.classList.toggle('bad', !!bad);
+  }
+  const mid = $('set-machine');
+  if (mid) mid.textContent = state.studio.machineId || '—';
   const sel = $('set-profile');
   sel.innerHTML = (state.profiles.length ? state.profiles : [state.profile])
     .map((p) => '<option value="' + esc(p) + '"' + (p === state.profile ? ' selected' : '') + '>' + esc(p) + '</option>').join('');
+  document.querySelectorAll('#theme-seg .seg-item').forEach((b) => {
+    b.classList.toggle('active', b.getAttribute('data-theme') === state.theme);
+  });
 }
 
 /* ============================== 事件绑定 ============================== */
@@ -2615,6 +3035,8 @@ function bind() {
 
   $('btn-settings').addEventListener('click', () => switchTab('settings'));
   $('btn-search').addEventListener('click', () => toggleSearch(true));
+  $('wb-refresh').addEventListener('click', () => { renderWorkbench(); });
+  $('wb-back').addEventListener('click', wbClose);
   $('search-cancel').addEventListener('click', () => toggleSearch(false));
   $('search-input').addEventListener('input', () => {
     clearTimeout(bind._st);
@@ -2643,11 +3065,43 @@ function bind() {
   // 粘贴图片发送（复刻 web 端）。按钮已弃用，避免输入区太挤。
   // 只在聊天视图上绑一次：paste 会从输入框冒泡上来，绑两处会重复处理。
   $('view-chat').addEventListener('paste', handlePaste);
-  // 保留隐藏的 file input 作为兜底（原生选择器仍可用）
-  $('img-picker').addEventListener('change', (e) => {
-    onFilesPicked(e.target.files);
-    e.target.value = '';
+  // 附件入口（Ekko 式）：不再依赖 WebView 粘贴（Android WebView 的 paste 常不带图片文件）
+  $('chat-plus').addEventListener('click', openAttachPanel);
+  $('attach-cancel').addEventListener('click', closeAttachPanel);
+  $('attach-panel').addEventListener('click', (e) => {
+    if (e.target === $('attach-panel')) closeAttachPanel();
   });
+  document.querySelectorAll('.attach-item').forEach((b) => {
+    b.addEventListener('click', () => triggerPicker(b.getAttribute('data-kind')));
+  });
+  ['pick-photo', 'pick-camera', 'pick-file'].forEach((id) => {
+    const el = $(id);
+    if (!el) return;
+    el.addEventListener('change', (e) => {
+      onFilesPicked(e.target.files);
+      e.target.value = '';
+    });
+  });
+  document.querySelectorAll('#theme-seg .seg-item').forEach((b) => {
+    b.addEventListener('click', () => setTheme(b.getAttribute('data-theme')));
+  });
+  $('btn-switch-studio').addEventListener('click', () => {
+    logout(false);
+    toast('已返回登录页，可切换或添加 Studio');
+  });
+  // 图片全屏查看：消息里的 .chat-img 点一下打开灯箱（遮罩/✕ 关闭）
+  $('msg-list').addEventListener('click', (e) => {
+    const img = e.target && e.target.closest ? e.target.closest('img.chat-img') : null;
+    if (!img) return;
+    e.preventDefault();
+    openLightbox(img.getAttribute('src'));
+  });
+  $('lightbox').addEventListener('click', (e) => {
+    if (e.target === $('lightbox') || e.target.closest('#lightbox-close')) closeLightbox();
+  });
+  // 长按气泡复制文本（WebView 里 navigator.clipboard 常不可用 → 优先原生桥）
+  bindLongPressCopy($('msg-list'));
+
   $('chat-stop').addEventListener('click', stopRun);
   $('chat-input').addEventListener('input', (e) => autoGrow(e.target));
   // 回车默认换行（md 写代码/列表刚需）。发送走按钮，不抢键盘。
@@ -2682,7 +3136,7 @@ function bind() {
   });
   $('model-default').addEventListener('click', () => {
     state.chosenModel = null;
-    $('chat-model').textContent = '模型';
+    setPillText($('chat-model'), '模型');
     closeModelSheet();
     toast('使用默认模型');
   });
@@ -2750,16 +3204,758 @@ function bind() {
   });
 }
 
+/* ============================== 工作台 ============================== */
+/**
+ * 工作台：把自建 Studio 里「不依赖云」的管理能力搬到手机上。
+ * 全部走 /api/hermes/* 与 /api/studio/*，不做任何 Ekko 云调用。
+ * 设计原则：只读优先、危险操作要二次确认、端点不支持时明确说「当前 Studio 不支持」。
+ */
+
+const WB_ITEMS = [
+  { key: 'workflows', icon: '🧩', name: '工作流', desc: '查看与运行 Studio 工作流' },
+  { key: 'skills', icon: '🧠', name: '技能', desc: '启停与查看技能' },
+  { key: 'mcp', icon: '🔌', name: 'MCP', desc: '服务器状态 / 测试 / 重载' },
+  { key: 'memory', icon: '📚', name: '记忆', desc: '笔记 / 用户画像 / 灵魂' },
+  { key: 'jobs', icon: '⏱', name: '定时任务', desc: '查看、暂停、立即运行' },
+  { key: 'usage', icon: '📊', name: '用量', desc: 'Token 与费用统计' },
+  { key: 'perf', icon: '📈', name: '监控', desc: 'CPU / 内存 / 活跃会话' },
+  { key: 'logs', icon: '📜', name: '日志', desc: '查看 Studio 运行日志' },
+];
+
+function wbItem(key) {
+  return WB_ITEMS.find((x) => x.key === key) || null;
+}
+
+function renderWorkbench() {
+  const el = $('wb-body');
+  if (!el) return;
+  el.innerHTML = '<div class="wb-grid">' + WB_ITEMS.map((item) =>
+    '<button class="wb-tile" data-key="' + esc(item.key) + '">' +
+      '<span class="wb-tile-ico">' + item.icon + '</span>' +
+      '<span class="wb-tile-name">' + esc(item.name) + '</span>' +
+      '<span class="wb-tile-desc">' + esc(item.desc) + '</span>' +
+    '</button>').join('') + '</div>' +
+    '<div class="wb-foot">Profile：' + esc(state.profile) + ' · Studio ' +
+      esc(state.studio.version ? ('v' + state.studio.version) : '版本未知') + '</div>';
+  el.querySelectorAll('.wb-tile').forEach((b) => {
+    b.addEventListener('click', () => wbOpen(b.getAttribute('data-key')));
+  });
+}
+
+/** 工作台子页统一的操作按钮区。 */
+function wbActions(html) {
+  const el = $('wb-actions');
+  if (!el) return;
+  el.innerHTML = html || '';
+}
+
+async function wbOpen(key) {
+  const item = wbItem(key);
+  if (!item) return;
+  state.wb = { key: key, data: null, loading: true };
+  $('wb-sheet').classList.remove('hidden');
+  $('wb-title').textContent = item.name;
+  $('wb-sub').textContent = item.desc;
+  wbActions('');
+  $('wb-content').innerHTML = '<div class="empty">加载中…</div>';
+  await wbLoad();
+}
+
+function wbClose() {
+  state.wb = { key: '', data: null, loading: false };
+  $('wb-sheet').classList.add('hidden');
+}
+
+async function wbLoad() {
+  const key = state.wb.key;
+  if (!key) return;
+  try {
+    if (key === 'workflows') return await wbLoadWorkflows();
+    if (key === 'skills') return await wbLoadSkills();
+    if (key === 'mcp') return await wbLoadMcp();
+    if (key === 'memory') return await wbLoadMemory();
+    if (key === 'jobs') return await wbLoadJobs();
+    if (key === 'usage') return await wbLoadUsage(7);
+    if (key === 'perf') return await wbLoadPerf();
+    if (key === 'logs') return await wbLoadLogs();
+  } catch (e) {
+    wbError(e);
+  }
+}
+
+function wbError(e) {
+  const msg = String((e && e.message) || e || '未知错误');
+  const unsupported = /HTTP 40[45]|HTTP 501|not found|不支持|unknown/i.test(msg);
+  $('wb-content').innerHTML = '<div class="wb-error">' +
+    esc(unsupported ? '当前 Studio 不支持该功能：' + msg : '加载失败：' + msg) +
+    '</div>';
+}
+
+/* ---------- 工作流 ---------- */
+async function wbLoadWorkflows() {
+  const res = await api('/api/studio/workflows?profile=' + encodeURIComponent(state.profile),
+    { noProfileHeader: true });
+  const list = (res && res.workflows) || [];
+  state.wb.data = list;
+  wbActions('<button class="icon-btn" id="wb-wf-refresh" title="刷新">⟳</button>');
+  const btn = $('wb-wf-refresh');
+  if (btn) btn.addEventListener('click', wbLoad);
+  if (!list.length) {
+    $('wb-content').innerHTML = '<div class="empty">还没有工作流<br><span class="wb-hint">在 Studio Web 版创建工作流后，这里可以查看并一键运行。</span></div>';
+    return;
+  }
+  $('wb-content').innerHTML = list.map((wf) => {
+    const nodes = Array.isArray(wf.nodes) ? wf.nodes.length : 0;
+    const edges = Array.isArray(wf.edges) ? wf.edges.length : 0;
+    return '<div class="wb-card" data-id="' + esc(wf.id) + '">' +
+      '<div class="wb-card-head">' +
+        '<span class="wb-card-title">' + esc(wf.name || '（未命名工作流）') + '</span>' +
+        '<span class="wb-chip">' + nodes + ' 节点 · ' + edges + ' 连线</span>' +
+      '</div>' +
+      '<div class="wb-card-meta">' + esc(wf.workspace || '默认工作区') +
+        ' · 更新 ' + fmtTime(wf.updated_at) + '</div>' +
+      '<div class="wb-card-actions">' +
+        '<button class="btn-ghost tiny" data-act="run">运行</button>' +
+        '<button class="btn-ghost tiny" data-act="runs">运行记录</button>' +
+      '</div>' +
+    '</div>';
+  }).join('');
+  $('wb-content').querySelectorAll('.wb-card').forEach((card) => {
+    const id = card.getAttribute('data-id');
+    const wf = list.find((x) => x.id === id) || {};
+    card.querySelectorAll('button').forEach((b) => {
+      b.addEventListener('click', () => {
+        const act = b.getAttribute('data-act');
+        if (act === 'run') wbRunWorkflow(id, wf.name || '');
+        if (act === 'runs') wbShowWorkflowRuns(id, wf.name || '');
+      });
+    });
+  });
+}
+
+async function wbRunWorkflow(id, name) {
+  const ok = await confirmDialog('运行工作流「' + (name || id) + '」？', '将在 Studio 上立即执行一次（会自动选择起始节点）。');
+  if (!ok) return;
+  try {
+    await api('/api/studio/workflows/' + encodeURIComponent(id) + '/run', { method: 'POST', body: {} });
+    toast('已开始运行');
+    wbShowWorkflowRuns(id, name);
+  } catch (e) {
+    toast('运行失败：' + ((e && e.message) || e));
+  }
+}
+
+const WB_RUN_STATUS = {
+  queued: '排队中', running: '运行中', completed: '已完成', failed: '失败', canceled: '已取消',
+};
+
+async function wbShowWorkflowRuns(id, name) {
+  $('wb-sub').textContent = (name || '工作流') + ' · 运行记录';
+  wbActions('<button class="btn-ghost tiny" id="wb-wf-back">← 列表</button>');
+  const back = $('wb-wf-back');
+  if (back) back.addEventListener('click', () => { wbActions(''); wbLoadWorkflows(); });
+  $('wb-content').innerHTML = '<div class="empty">读取中…</div>';
+  try {
+    const res = await api('/api/studio/workflows/' + encodeURIComponent(id) + '/runs?limit=20');
+    const runs = (res && res.runs) || [];
+    if (!runs.length) {
+      $('wb-content').innerHTML = '<div class="empty">还没有运行记录</div>';
+      return;
+    }
+    $('wb-content').innerHTML = runs.map((r) => {
+      const status = String(r.status || '');
+      const label = WB_RUN_STATUS[status] || status;
+      const cls = status === 'completed' ? 'ok' : (status === 'failed' ? 'bad' : (status === 'running' ? 'busy' : ''));
+      const started = r.started_at || r.created_at;
+      const dur = r.started_at && r.finished_at ? (r.finished_at - r.started_at) : 0;
+      return '<div class="wb-row wb-run" data-run="' + esc(r.id) + '">' +
+        '<div class="wb-row-main">' +
+          '<div class="wb-row-title"><span class="wb-chip ' + cls + '">' + esc(label) + '</span> ' +
+            esc(String(r.id).slice(0, 12)) + '</div>' +
+          '<div class="wb-row-meta">' + fmtTime(started) +
+            (dur ? ' · ' + formatElapsed(dur) : '') +
+            (r.error ? ' · ' + esc(String(r.error).slice(0, 60)) : '') + '</div>' +
+        '</div>' +
+        ((status === 'running' || status === 'queued')
+          ? '<button class="btn-ghost tiny" data-act="stop">停止</button>' : '') +
+      '</div>';
+    }).join('');
+    $('wb-content').querySelectorAll('.wb-run').forEach((row) => {
+      const runId = row.getAttribute('data-run');
+      const stop = row.querySelector('[data-act="stop"]');
+      if (stop) stop.addEventListener('click', () => wbStopRun(id, runId, name));
+    });
+  } catch (e) {
+    wbError(e);
+  }
+}
+
+async function wbStopRun(id, runId, name) {
+  const ok = await confirmDialog('停止这次运行？', '已完成的节点会保留，未开始的节点不再执行。');
+  if (!ok) return;
+  try {
+    await api('/api/studio/workflows/' + encodeURIComponent(id) + '/runs/' + encodeURIComponent(runId) + '/stop',
+      { method: 'POST' });
+    toast('已请求停止');
+    wbShowWorkflowRuns(id, name);
+  } catch (e) {
+    toast('停止失败：' + ((e && e.message) || e));
+  }
+}
+
+/* ---------- 技能 ---------- */
+async function wbLoadSkills() {
+  const res = await api('/api/hermes/skills');
+  const cats = (res && res.categories) || [];
+  state.wb.data = res || {};
+  wbActions('<button class="icon-btn" id="wb-sk-refresh" title="刷新">⟳</button>');
+  const btn = $('wb-sk-refresh');
+  if (btn) btn.addEventListener('click', wbLoad);
+  if (!cats.length) {
+    $('wb-content').innerHTML = '<div class="empty">暂无技能</div>';
+    return;
+  }
+  $('wb-content').innerHTML = cats.map((cat) => {
+    const skills = cat.skills || [];
+    return '<div class="wb-group">' +
+      '<div class="wb-group-head">' + esc(cat.name || '未分类') +
+        '<span class="wb-chip">' + skills.length + '</span></div>' +
+      skills.map((s) => {
+        const on = s.enabled !== false;
+        return '<div class="wb-row wb-skill" data-cat="' + esc(cat.name || '') + '" data-name="' + esc(s.name) + '">' +
+          '<div class="wb-row-main">' +
+            '<div class="wb-row-title">' + esc(s.name) + (s.pinned ? ' 📌' : '') + '</div>' +
+            '<div class="wb-row-meta">' + esc(String(s.description || '').slice(0, 90)) + '</div>' +
+          '</div>' +
+          '<button class="wb-switch' + (on ? ' on' : '') + '" data-name="' + esc(s.name) + '" ' +
+            'data-on="' + (on ? '1' : '0') + '">' + (on ? '已启用' : '已停用') + '</button>' +
+        '</div>';
+      }).join('') +
+    '</div>';
+  }).join('');
+  $('wb-content').querySelectorAll('.wb-switch').forEach((b) => {
+    b.addEventListener('click', () => wbToggleSkill(b));
+  });
+  // 点技能行 → 查看/编辑内容（开关自己处理，不冒泡）
+  $('wb-content').querySelectorAll('.wb-skill').forEach((row) => {
+    row.addEventListener('click', (e) => {
+      if (e.target.closest && e.target.closest('.wb-switch')) return;
+      wbOpenSkill(row.getAttribute('data-cat'), row.getAttribute('data-name'));
+    });
+  });
+}
+
+/** 查看/编辑单个技能内容（GET/PUT /api/hermes/skills/:category/:name）。 */
+async function wbOpenSkill(cat, name) {
+  $('wb-sub').textContent = (cat ? cat + ' / ' : '') + name;
+  wbActions('<button class="btn-ghost tiny" id="wb-skill-back">← 列表</button>');
+  const back = $('wb-skill-back');
+  if (back) back.addEventListener('click', () => { wbActions(''); wbLoadSkills(); });
+  $('wb-content').innerHTML = '<div class="empty">读取中…</div>';
+  const path = (cat ? encodeURIComponent(cat) + '/' : '') + encodeURIComponent(name);
+  try {
+    const res = await api('/api/hermes/skills/' + path);
+    const content = (res && res.content) || '';
+    $('wb-content').innerHTML =
+      '<div class="wb-group"><div class="wb-group-head">SKILL 内容</div>' +
+        '<textarea class="wb-textarea wb-skill-content" rows="20" spellcheck="false">' + esc(content) + '</textarea>' +
+        '<div class="wb-card-actions"><button class="btn-primary tiny" id="wb-skill-save">保存</button></div>' +
+      '</div>';
+    const save = $('wb-skill-save');
+    if (save) save.addEventListener('click', () => wbSaveSkill(path, name));
+  } catch (e) {
+    wbError(e);
+  }
+}
+
+async function wbSaveSkill(path, name) {
+  const ta = $('wb-content').querySelector('.wb-skill-content');
+  const btn = $('wb-skill-save');
+  if (!ta) return;
+  if (btn) btn.disabled = true;
+  try {
+    await api('/api/hermes/skills/' + path, { method: 'PUT', body: { content: ta.value } });
+    toast('已保存 ' + name);
+  } catch (e) {
+    toast('保存失败：' + ((e && e.message) || e));
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function wbToggleSkill(btn) {
+  const name = btn.getAttribute('data-name');
+  const next = btn.getAttribute('data-on') !== '1';
+  btn.disabled = true;
+  try {
+    await api('/api/hermes/skills/toggle', { method: 'PUT', body: { name: name, enabled: next } });
+    btn.setAttribute('data-on', next ? '1' : '0');
+    btn.classList.toggle('on', next);
+    btn.textContent = next ? '已启用' : '已停用';
+    toast((next ? '已启用 ' : '已停用 ') + name);
+  } catch (e) {
+    toast('操作失败：' + ((e && e.message) || e));
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+/* ---------- MCP ---------- */
+async function wbLoadMcp() {
+  const res = await api('/api/hermes/mcp/servers');
+  const servers = (res && res.servers) || [];
+  state.wb.data = res || {};
+  wbActions('<button class="icon-btn" id="wb-mcp-reload" title="全部重载">⟳</button>');
+  const btn = $('wb-mcp-reload');
+  if (btn) btn.addEventListener('click', wbReloadMcp);
+  const total = (res && res.total_tools) || 0;
+  if (!servers.length) {
+    $('wb-content').innerHTML = '<div class="empty">还没有配置 MCP 服务器<br><span class="wb-hint">在 Studio Web 版的 MCP 设置里添加。</span></div>';
+    return;
+  }
+  $('wb-content').innerHTML =
+    '<div class="wb-summary">共 ' + servers.length + ' 个服务器 · ' + total + ' 个工具</div>' +
+    servers.map((s) => {
+      const ok = !!s.connected;
+      return '<div class="wb-card">' +
+        '<div class="wb-card-head">' +
+          '<span class="wb-card-title">' + esc(s.name) + '</span>' +
+          '<span class="wb-chip ' + (ok ? 'ok' : 'bad') + '">' + (ok ? '已连接' : '未连接') + '</span>' +
+        '</div>' +
+        '<div class="wb-card-meta">' + esc(s.transport || 'stdio') + ' · ' +
+          Number(s.tools || 0) + ' 个工具' +
+          (s.error ? ' · ' + esc(String(s.error).slice(0, 60)) : '') + '</div>' +
+        '<div class="wb-card-actions">' +
+          '<button class="btn-ghost tiny" data-act="test">测试</button>' +
+          '<button class="btn-ghost tiny" data-act="reload">重载</button>' +
+        '</div>' +
+      '</div>';
+    }).join('');
+  $('wb-content').querySelectorAll('.wb-card').forEach((card) => {
+    const name = card.querySelector('.wb-card-title').textContent;
+    card.querySelectorAll('button').forEach((b) => {
+      b.addEventListener('click', () => {
+        if (b.getAttribute('data-act') === 'test') wbTestMcp(name);
+        else wbReloadMcp(name);
+      });
+    });
+  });
+}
+
+async function wbTestMcp(name) {
+  toast('正在测试 ' + name + '…');
+  try {
+    const res = await api('/api/hermes/mcp/servers/' + encodeURIComponent(name) + '/test', { method: 'POST' });
+    if (res && res.ok) toast('连接正常，' + (Array.isArray(res.tools) ? res.tools.length : 0) + ' 个工具可用');
+    else toast('测试失败：' + ((res && res.error) || '未知错误'));
+  } catch (e) {
+    toast('测试失败：' + ((e && e.message) || e));
+  }
+}
+
+async function wbReloadMcp(name) {
+  try {
+    const q = name ? ('?name=' + encodeURIComponent(name)) : '';
+    await api('/api/hermes/mcp/reload' + q, { method: 'POST' });
+    toast(name ? ('已重载 ' + name) : '已请求全部重载');
+    setTimeout(wbLoad, 800);
+  } catch (e) {
+    toast('重载失败：' + ((e && e.message) || e));
+  }
+}
+
+/* ---------- 记忆 ---------- */
+async function wbLoadMemory() {
+  const res = await api('/api/hermes/memory');
+  state.wb.data = res || {};
+  wbActions('');
+  const secs = [
+    { key: 'memory', label: '我的笔记', hint: '长期记忆：Agent 会读这段。' },
+    { key: 'user', label: '用户画像', hint: '关于你的稳定信息（偏好、习惯）。' },
+    { key: 'soul', label: '灵魂', hint: 'SOUL 配置：Agent 的人设与原则。' },
+  ];
+  $('wb-content').innerHTML = secs.map((s) =>
+    '<div class="wb-group">' +
+      '<div class="wb-group-head">' + s.label + '</div>' +
+      '<div class="wb-hint">' + esc(s.hint) + '</div>' +
+      '<textarea class="wb-textarea" data-sec="' + s.key + '" rows="6">' +
+        esc((res && res[s.key]) || '') + '</textarea>' +
+      '<div class="wb-card-actions"><button class="btn-primary tiny" data-save="' + s.key + '">保存' +
+        (res && res[s.key + '_mtime'] ? ' · ' + fmtTime(res[s.key + '_mtime']) : '') + '</button></div>' +
+    '</div>').join('');
+  $('wb-content').querySelectorAll('[data-save]').forEach((b) => {
+    b.addEventListener('click', () => wbSaveMemory(b.getAttribute('data-save'), b));
+  });
+}
+
+async function wbSaveMemory(section, btn) {
+  const ta = $('wb-content').querySelector('.wb-textarea[data-sec="' + section + '"]');
+  if (!ta) return;
+  btn.disabled = true;
+  try {
+    await api('/api/hermes/memory', { method: 'POST', body: { section: section, content: ta.value } });
+    toast('已保存 ' + section);
+  } catch (e) {
+    toast('保存失败：' + ((e && e.message) || e));
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+/* ---------- 定时任务 ---------- */
+async function wbLoadJobs() {
+  const res = await api('/api/hermes/jobs?include_disabled=true');
+  const jobs = (res && res.jobs) || [];
+  state.wb.data = jobs;
+  wbActions('<button class="icon-btn" id="wb-job-refresh" title="刷新">⟳</button>');
+  const btn = $('wb-job-refresh');
+  if (btn) btn.addEventListener('click', wbLoad);
+  if (!jobs.length) {
+    $('wb-content').innerHTML = '<div class="empty">暂无定时任务<br><span class="wb-hint">在 Studio Web 版的定时任务里创建。</span></div>';
+    return;
+  }
+  $('wb-content').innerHTML = jobs.map((j) => {
+    const id = j.job_id || j.id;
+    const enabled = !!j.enabled;
+    const paused = String(j.state || '') === 'paused' || !!j.paused_at;
+    const last = j.last_status ? String(j.last_status) : '';
+    return '<div class="wb-card" data-id="' + esc(id) + '">' +
+      '<div class="wb-card-head">' +
+        '<span class="wb-card-title">' + esc(j.name || id) + '</span>' +
+        '<span class="wb-chip ' + (enabled ? 'ok' : '') + '">' + (paused ? '已暂停' : (enabled ? '运行中' : '已停用')) + '</span>' +
+      '</div>' +
+      '<div class="wb-card-meta">' + esc(j.schedule_display || '—') +
+        ' · 上次 ' + (j.last_run_at ? fmtTime(j.last_run_at) : '从未') +
+        (last ? '（' + esc(last) + '）' : '') + '</div>' +
+      '<div class="wb-card-meta">下次 ' + (j.next_run_at ? fmtTime(j.next_run_at) : '—') + '</div>' +
+      '<div class="wb-card-actions">' +
+        '<button class="btn-ghost tiny" data-act="run">立即运行</button>' +
+        '<button class="btn-ghost tiny" data-act="history">运行历史</button>' +
+        (paused
+          ? '<button class="btn-ghost tiny" data-act="resume">恢复</button>'
+          : '<button class="btn-ghost tiny" data-act="pause">暂停</button>') +
+      '</div>' +
+    '</div>';
+  }).join('');
+  $('wb-content').querySelectorAll('.wb-card').forEach((card) => {
+    const id = card.getAttribute('data-id');
+    card.querySelectorAll('button').forEach((b) => {
+      b.addEventListener('click', () => {
+        const act = b.getAttribute('data-act');
+        if (act === 'history') wbShowJobHistory(id);
+        else wbJobAction(id, act);
+      });
+    });
+  });
+}
+
+/** 定时任务的运行历史（GET /api/cron-history?jobId=）。 */
+async function wbShowJobHistory(jobId) {
+  const job = (state.wb.data || []).find((j) => (j.job_id || j.id) === jobId) || {};
+  $('wb-sub').textContent = (job.name || jobId) + ' · 运行历史';
+  wbActions('<button class="btn-ghost tiny" id="wb-job-back">← 列表</button>');
+  const back = $('wb-job-back');
+  if (back) back.addEventListener('click', () => { wbActions(''); wbLoadJobs(); });
+  $('wb-content').innerHTML = '<div class="empty">读取中…</div>';
+  try {
+    const res = await api('/api/cron-history?jobId=' + encodeURIComponent(jobId));
+    const runs = (res && res.runs) || [];
+    if (!runs.length) {
+      $('wb-content').innerHTML = '<div class="empty">该任务还没有运行记录</div>';
+      return;
+    }
+    $('wb-content').innerHTML = runs.map((r) =>
+      '<div class="wb-row wb-cron-run" data-file="' + esc(r.fileName) + '">' +
+        '<div class="wb-row-main">' +
+          '<div class="wb-row-title">' + esc(r.runTime || r.fileName) + '</div>' +
+          '<div class="wb-row-meta">' + esc(r.fileName) +
+            (r.size ? ' · ' + fileSizeText(r.size) : '') + '</div>' +
+        '</div>' +
+        '<span class="wb-chip">查看</span>' +
+      '</div>').join('');
+    $('wb-content').querySelectorAll('.wb-cron-run').forEach((row) => {
+      row.addEventListener('click', () => wbShowCronRun(jobId, row.getAttribute('data-file')));
+    });
+  } catch (e) {
+    wbError(e);
+  }
+}
+
+/** 单次运行日志内容（GET /api/cron-history/:jobId/:fileName）。 */
+async function wbShowCronRun(jobId, fileName) {
+  $('wb-sub').textContent = fileName;
+  wbActions('<button class="btn-ghost tiny" id="wb-cron-back">← 历史</button>');
+  const back = $('wb-cron-back');
+  if (back) back.addEventListener('click', () => { wbShowJobHistory(jobId); });
+  $('wb-content').innerHTML = '<div class="empty">读取中…</div>';
+  try {
+    const res = await api('/api/cron-history/' + encodeURIComponent(jobId) + '/' + encodeURIComponent(fileName));
+    const content = (res && res.content) || '';
+    $('wb-content').innerHTML = '<pre class="wb-pre">' + esc(content) + '</pre>';
+  } catch (e) {
+    wbError(e);
+  }
+}
+
+async function wbJobAction(id, act) {
+  if (act === 'run') {
+    const ok = await confirmDialog('立即运行这个任务？', '会在 Studio 上立刻执行一次（不影响原有排程）。');
+    if (!ok) return;
+  }
+  try {
+    await api('/api/hermes/jobs/' + encodeURIComponent(id) + '/' + act, { method: 'POST' });
+    toast(act === 'run' ? '已触发运行' : (act === 'pause' ? '已暂停' : '已恢复'));
+    setTimeout(wbLoad, 600);
+  } catch (e) {
+    toast('操作失败：' + ((e && e.message) || e));
+  }
+}
+
+/* ---------- 用量 ---------- */
+async function wbLoadUsage(days) {
+  const d = [1, 7, 30].includes(days) ? days : 7;
+  state.wb.data = { days: d };
+  wbActions('');
+  const params = new URLSearchParams({ days: String(d), profile: state.profile });
+  const res = await api('/api/studio/usage/stats?' + params.toString(), { noProfileHeader: true });
+  const inTok = Number(res.total_input_tokens || 0);
+  const outTok = Number(res.total_output_tokens || 0);
+  const cacheRead = Number(res.total_cache_read_tokens || 0);
+  const cacheWrite = Number(res.total_cache_write_tokens || 0);
+  const cost = Number(res.total_cost || 0);
+  const sessions = Number(res.total_sessions || 0);
+  const models = (res.model_usage || []).slice().sort((a, b) =>
+    (b.input_tokens + b.output_tokens) - (a.input_tokens + a.output_tokens)).slice(0, 5);
+  const daily = (res.daily_usage || []).slice(-14);
+  const maxDaily = daily.reduce((m, x) => Math.max(m, Number(x.input_tokens || 0) + Number(x.output_tokens || 0)), 0) || 1;
+
+  $('wb-content').innerHTML =
+    '<div class="wb-seg">' +
+      [1, 7, 30].map((n) =>
+        '<button class="seg-item' + (n === d ? ' active' : '') + '" data-days="' + n + '">' +
+        (n === 1 ? '今天' : n + ' 天') + '</button>').join('') +
+    '</div>' +
+    '<div class="wb-stats">' +
+      '<div class="wb-stat"><b>' + fmtTokens(inTok + outTok) + '</b><span>输入+输出</span></div>' +
+      '<div class="wb-stat"><b>' + fmtTokens(cacheRead) + '</b><span>缓存读取</span></div>' +
+      '<div class="wb-stat"><b>' + (cost > 0 ? '$' + cost.toFixed(2) : '—') + '</b><span>费用</span></div>' +
+      '<div class="wb-stat"><b>' + sessions + '</b><span>会话</span></div>' +
+    '</div>' +
+    '<div class="wb-summary">输入 ' + fmtTokens(inTok) + ' · 输出 ' + fmtTokens(outTok) +
+      ' · 缓存写 ' + fmtTokens(cacheWrite) + '</div>' +
+    (models.length
+      ? '<div class="wb-group"><div class="wb-group-head">按模型</div>' + models.map((m) => {
+          const tot = Number(m.input_tokens || 0) + Number(m.output_tokens || 0);
+          const pct = (inTok + outTok) > 0 ? Math.round(tot / (inTok + outTok) * 100) : 0;
+          return '<div class="wb-bar-row"><span class="wb-bar-name">' + esc(m.model) + '</span>' +
+            '<span class="wb-bar"><i style="width:' + pct + '%"></i></span>' +
+            '<span class="wb-bar-val">' + fmtTokens(tot) + '</span></div>';
+        }).join('') + '</div>'
+      : '') +
+    (daily.length
+      ? '<div class="wb-group"><div class="wb-group-head">每日趋势</div><div class="wb-days">' +
+        daily.map((x) => {
+          const tot = Number(x.input_tokens || 0) + Number(x.output_tokens || 0);
+          const h = Math.max(2, Math.round(tot / maxDaily * 100));
+          return '<div class="wb-day" title="' + esc(x.date + ' · ' + fmtTokens(tot)) + '">' +
+            '<i style="height:' + h + '%"></i><span>' + esc(String(x.date).slice(5)) + '</span></div>';
+        }).join('') + '</div></div>'
+      : '');
+
+  $('wb-content').querySelectorAll('.wb-seg .seg-item').forEach((b) => {
+    b.addEventListener('click', () => wbLoadUsage(Number(b.getAttribute('data-days'))));
+  });
+}
+
+/* ---------- 监控 ---------- */
+async function wbLoadPerf() {
+  const res = await api('/api/studio/performance/runtime');
+  state.wb.data = res || {};
+  wbActions('<button class="icon-btn" id="wb-perf-refresh" title="刷新">⟳</button>');
+  const btn = $('wb-perf-refresh');
+  if (btn) btn.addEventListener('click', wbLoad);
+  const sys = (res && res.system) || {};
+  const web = (res && res.web) || {};
+  const bridge = (res && res.bridge) || {};
+  const sess = (res && res.sessions) || {};
+  const workers = Array.isArray(bridge.workers) ? bridge.workers : [];
+  const mb = (n) => (Number(n || 0) / 1024 / 1024).toFixed(0) + ' MB';
+  const webMem = Object.values(web.memory || {}).reduce((a, b) => a + (Number(b) || 0), 0);
+  $('wb-content').innerHTML =
+    '<div class="wb-stats">' +
+      '<div class="wb-stat"><b>' + (Number(sys.cpuPercent || 0)).toFixed(0) + '%</b><span>系统 CPU</span></div>' +
+      '<div class="wb-stat"><b>' + (Number(sys.memoryPercent || 0)).toFixed(0) + '%</b><span>系统内存</span></div>' +
+      '<div class="wb-stat"><b>' + Number(sess.active || 0) + '</b><span>活跃会话</span></div>' +
+      '<div class="wb-stat"><b>' + Number(sess.running || 0) + '</b><span>正在运行</span></div>' +
+    '</div>' +
+    '<div class="wb-group"><div class="wb-group-head">进程</div>' +
+      '<div class="wb-row"><div class="wb-row-main"><div class="wb-row-title">Web</div>' +
+        '<div class="wb-row-meta">PID ' + esc(String(web.pid || '—')) + ' · 内存 ' +
+        mb(webMem) + '</div></div></div>' +
+      '<div class="wb-row"><div class="wb-row-main"><div class="wb-row-title">Bridge</div>' +
+        '<div class="wb-row-meta">' + (bridge.reachable ? '可达' : '不可达') +
+        ' · Broker ' + (bridge.broker && bridge.broker.running ? '运行中' : '已停止') +
+        ' · ' + workers.length + ' 个 Worker</div></div></div>' +
+    '</div>' +
+    (workers.length
+      ? '<div class="wb-group"><div class="wb-group-head">Workers</div>' + workers.map((w) =>
+          '<div class="wb-row"><div class="wb-row-main">' +
+            '<div class="wb-row-title">' + esc(w.profile || ('worker ' + w.pid)) + '</div>' +
+            '<div class="wb-row-meta">PID ' + esc(String(w.pid || '—')) +
+            ' · CPU ' + (Number(w.cpuPercent || 0)).toFixed(0) + '%' +
+            ' · 内存 ' + mb(w.memoryRssBytes) +
+            ' · 会话 ' + Number(w.sessionCount || 0) + '</div>' +
+          '</div></div>').join('') + '</div>'
+      : '') +
+    '<div class="wb-foot">更新时间 ' + fmtTime((res && res.timestamp) || Date.now()) + '</div>';
+}
+
+/** 图片灯箱：全屏查看消息图片（Ekko 同款交互）。 */
+function openLightbox(src) {
+  if (!src) return;
+  const box = $('lightbox');
+  const img = $('lightbox-img');
+  if (!box || !img) return;
+  img.src = src;
+  box.classList.remove('hidden');
+}
+
+function closeLightbox() {
+  const box = $('lightbox');
+  if (!box) return;
+  box.classList.add('hidden');
+  const img = $('lightbox-img');
+  if (img) img.removeAttribute('src');
+}
+
+/** 复制文本：原生桥优先（WebView 的 navigator.clipboard 在 http/file 下常被禁）。 */
+function copyText(text) {
+  const s = String(text || '');
+  if (!s) return false;
+  try {
+    if (window.Android && window.Android.copyText) {
+      window.Android.copyText(s);
+      return true;
+    }
+  } catch (e) {}
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(s);
+      return true;
+    }
+  } catch (e) {}
+  return false;
+}
+
+/** 长按消息气泡 → 复制纯文本。 */
+function bindLongPressCopy(root) {
+  let timer = null;
+  let startX = 0;
+  let startY = 0;
+  let current = null;
+  const clear = () => { if (timer) { clearTimeout(timer); timer = null; } current = null; };
+  root.addEventListener('touchstart', (e) => {
+    const p = (e.touches && e.touches[0]) || e;
+    const bubble = e.target && e.target.closest ? e.target.closest('.bubble') : null;
+    if (!bubble) return;
+    current = bubble;
+    startX = p.clientX; startY = p.clientY;
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      timer = null;
+      const b = current;
+      current = null;
+      if (!b) return;
+      const text = (b.innerText || b.textContent || '').trim();
+      if (!text) return;
+      if (copyText(text)) toast('已复制');
+      else toast('复制失败，请手动选择文字');
+    }, 600);
+  }, { passive: true });
+  root.addEventListener('touchmove', (e) => {
+    const p = (e.touches && e.touches[0]) || e;
+    if (Math.abs(p.clientX - startX) > 12 || Math.abs(p.clientY - startY) > 12) clear();
+  }, { passive: true });
+  root.addEventListener('touchend', clear);
+  root.addEventListener('touchcancel', clear);
+}
+
+/* ---------- 日志 ---------- */
+async function wbLoadLogs() {
+  const res = await api('/api/studio/logs');
+  const files = (res && res.files) || [];
+  state.wb.data = files;
+  wbActions('<button class="icon-btn" id="wb-log-refresh" title="刷新"><svg class="ico"><use href="#i-refresh"/></svg></button>');
+  const btn = $('wb-log-refresh');
+  if (btn) btn.addEventListener('click', wbLoad);
+  if (!files.length) {
+    $('wb-content').innerHTML = '<div class="empty">还没有日志文件</div>';
+    return;
+  }
+  $('wb-content').innerHTML = files.map((f) =>
+    '<div class="wb-row wb-log-file" data-name="' + esc(f.name) + '">' +
+      '<div class="wb-row-main">' +
+        '<div class="wb-row-title">' + esc(f.name) + '</div>' +
+        '<div class="wb-row-meta">' + esc(f.size || '') + ' · ' + esc(f.modified || '') + '</div>' +
+      '</div>' +
+      '<span class="wb-chip">查看</span>' +
+    '</div>').join('');
+  $('wb-content').querySelectorAll('.wb-log-file').forEach((row) => {
+    row.addEventListener('click', () => wbShowLogFile(row.getAttribute('data-name')));
+  });
+}
+
+const LOG_LEVELS = [['', '全部'], ['error', '错误'], ['warn', '警告'], ['info', '信息']];
+
+async function wbShowLogFile(name, level) {
+  const lv = level || '';
+  $('wb-sub').textContent = name;
+  wbActions('<button class="btn-ghost tiny" id="wb-log-back">← 文件</button>');
+  const back = $('wb-log-back');
+  if (back) back.addEventListener('click', () => { wbActions(''); wbLoadLogs(); });
+  $('wb-content').innerHTML = '<div class="empty">读取中…</div>';
+  try {
+    const qs = '?lines=200' + (lv ? '&level=' + encodeURIComponent(lv) : '');
+    const res = await api('/api/studio/logs/' + encodeURIComponent(name) + qs);
+    const entries = (res && res.entries) || [];
+    const seg = '<div class="wb-seg">' + LOG_LEVELS.map(([v, label]) =>
+      '<button class="seg-item' + (v === lv ? ' active' : '') + '" data-level="' + v + '">' + label + '</button>').join('') +
+      '</div>';
+    const body = entries.length
+      ? '<div class="log-list">' + entries.map((e) => {
+          const l = String(e.level || 'info').toLowerCase();
+          const cls = l.includes('error') || l.includes('fatal') ? 'lv-error'
+            : (l.includes('warn') ? 'lv-warn' : '');
+          return '<div class="log-line ' + cls + '">' +
+            '<div class="log-head"><span class="log-ts">' + esc(String(e.timestamp || '').slice(11, 19)) + '</span>' +
+            '<span class="log-lv">' + esc(l) + '</span>' +
+            '<span class="log-logger">' + esc(String(e.logger || '').slice(0, 24)) + '</span></div>' +
+            '<div class="log-msg">' + esc(String(e.message || e.raw || '')) + '</div>' +
+          '</div>';
+        }).join('') + '</div>'
+      : '<div class="empty">没有符合条件的日志</div>';
+    $('wb-content').innerHTML = seg + body;
+    $('wb-content').querySelectorAll('.wb-seg .seg-item').forEach((b) => {
+      b.addEventListener('click', () => wbShowLogFile(name, b.getAttribute('data-level')));
+    });
+  } catch (e) {
+    wbError(e);
+  }
+}
+
 /* ============================== 启动 ============================== */
 function boot() {
+  applyTheme();
   bind();
   fillLogin();
+  renderStudioList();
   if (state.token) {
     // 校验 token 是否仍有效
     api('/api/auth/me', { noProfileHeader: true })
       .then(() => {
         connectSocket();
         loadAvatar();
+        probeStudio();
         switchTab('sessions');
       })
       .catch(() => {

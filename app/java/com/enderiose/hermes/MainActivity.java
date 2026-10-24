@@ -1,10 +1,13 @@
 package com.enderiose.hermes;
 
 import android.app.Activity;
+import android.content.ClipData;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.net.Uri;
 import android.os.Bundle;
+import android.provider.MediaStore;
+import java.io.File;
 import android.view.KeyEvent;
 import android.view.Window;
 import android.webkit.JavascriptInterface;
@@ -39,7 +42,7 @@ public class MainActivity extends Activity {
 
     private static final int REQ_PICK_IMAGE = 1001;
     private static final int REQ_CAPTURE_IMAGE = 1002;
-    private String capturePhotoPath = null;
+    private File capturePhotoFile = null;
     private ValueCallback<Uri[]> pendingCallback = null;
 
     /** 命名静态类（避免匿名类/内部类触发本工具链 d8 的 NPE）。 */
@@ -76,7 +79,7 @@ public class MainActivity extends Activity {
 
         public boolean onShowFileChooser(WebView webView, ValueCallback<Uri[]> filePathCallback,
                                          FileChooserParams fileChooserParams) {
-            activity.startImagePicker(filePathCallback, fileChooserParams);
+            activity.startFilePicker(filePathCallback, fileChooserParams);
             return true;
         }
 
@@ -110,6 +113,19 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public void finishApp() {
             activity.runOnUiThread(() -> activity.finish());
+        }
+
+        /** 复制文本（WebView 的 navigator.clipboard 在 http/file 下常被禁，走原生最可靠）。 */
+        @JavascriptInterface
+        public void copyText(final String text) {
+            if (text == null) return;
+            activity.runOnUiThread(() -> {
+                android.content.ClipboardManager cm = (android.content.ClipboardManager)
+                        activity.getSystemService(android.content.Context.CLIPBOARD_SERVICE);
+                if (cm != null) {
+                    cm.setPrimaryClip(ClipData.newPlainText("Hermes", text));
+                }
+            });
         }
 
         /** 消息里的链接：优先外置浏览器；不行就下载目录；都不行用系统默认处理。 */
@@ -232,10 +248,16 @@ public class MainActivity extends Activity {
     }
 
     /**
-     * <input type=file> 被触发时弹出选择器：相册 + 拍照（用 ACTION_CHOOSER 合并）。
-     * 回调结果在 onActivityResult 回给 WebView。
+     * <input type=file> 被触发时弹出选择器。
+     *
+     * 支持 3 种用法（JS 侧对应「照片 / 拍摄 / 文件」三个 input）：
+     *   · accept="image/*" multiple  → 相册多选
+     *   · accept="image/*" capture → 动作相机（全尺寸，走 SimpleFileProvider）
+     *   · accept 为任意类型占位    → 任意文件（文档/音频/压缩包…）
+     *
+     * 回调结果在 onActivityResult 回给 WebView（多选时读 ClipData）。
      */
-    void startImagePicker(ValueCallback<Uri[]> filePathCallback, FileChooserParams params) {
+    void startFilePicker(ValueCallback<Uri[]> filePathCallback, FileChooserParams params) {
         if (filePathCallback == null) return;
         // 上一个还没消费，先取消
         if (pendingCallback != null) {
@@ -244,32 +266,137 @@ public class MainActivity extends Activity {
         }
         pendingCallback = filePathCallback;
 
+        boolean capture = false;
+        boolean multiple = false;
+        String[] accept = null;
+        try {
+            capture = params != null && params.isCaptureEnabled();
+            multiple = params != null && params.getMode() == FileChooserParams.MODE_OPEN_MULTIPLE;
+            accept = params != null ? params.getAcceptTypes() : null;
+        } catch (Exception ignored) {}
+
+        if (capture && startCamera()) return;
+
         Intent pick = new Intent(Intent.ACTION_GET_CONTENT);
         pick.addCategory(Intent.CATEGORY_OPENABLE);
-        pick.setType("image/*");
+        String[] mimes = normalizeMimes(accept);
+        if (mimes == null) {
+            pick.setType("image/*");
+        } else if (mimes.length == 1) {
+            pick.setType(mimes[0]);
+        } else {
+            pick.setType("*/*");
+            pick.putExtra(Intent.EXTRA_MIME_TYPES, mimes);
+        }
+        if (multiple) pick.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
 
-        Intent chooser = Intent.createChooser(pick, "选择图片");
+        Intent chooser = Intent.createChooser(pick, "选择文件");
         try {
             startActivityForResult(chooser, REQ_PICK_IMAGE);
         } catch (Exception e) {
-            if (pendingCallback != null) {
-                pendingCallback.onReceiveValue(null);
-                pendingCallback = null;
-            }
+            cancelPending();
         }
+    }
+
+    /** 启动系统相机，输出到私有 cache（经 SimpleFileProvider 授权）。 */
+    private boolean startCamera() {
+        try {
+            File dir = new File(getCacheDir(), "camera");
+            if (!dir.exists() && !dir.mkdirs()) return false;
+            File out = new File(dir, "cap-" + System.currentTimeMillis() + ".jpg");
+            Uri uri = SimpleFileProvider.uriFor(this, out);
+            Intent take = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
+            take.putExtra(MediaStore.EXTRA_OUTPUT, uri);
+            take.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            capturePhotoFile = out;
+            startActivityForResult(take, REQ_CAPTURE_IMAGE);
+            return true;
+        } catch (Exception e) {
+            capturePhotoFile = null;
+            return false;
+        }
+    }
+
+    private void cancelPending() {
+        if (pendingCallback != null) {
+            try { pendingCallback.onReceiveValue(null); } catch (Exception ignored) {}
+            pendingCallback = null;
+        }
+    }
+
+    /**
+     * 把 <input accept> 归一成 MIME 列表；返回 null 表示「沿用默认 image/*」，
+     * 返回 {"*\/*"} 表示接受任意类型（调用方会按单元素走 setType）。
+     */
+    private static String[] normalizeMimes(String[] accept) {
+        if (accept == null || accept.length == 0) return null;
+        java.util.ArrayList<String> out = new java.util.ArrayList<String>();
+        for (String raw : accept) {
+            if (raw == null) continue;
+            String v = raw.trim().toLowerCase();
+            if (v.isEmpty()) continue;
+            if (v.contains("/")) {
+                if (!"*/*".equals(v) && !out.contains(v)) out.add(v);
+                continue;
+            }
+            // 扩展名兜底（部分实现返回 ".jpg,.png"）
+            if (v.startsWith(".png")) addOnce(out, "image/png");
+            else if (v.startsWith(".webp")) addOnce(out, "image/webp");
+            else if (v.startsWith(".heic")) addOnce(out, "image/heic");
+            else if (v.startsWith(".gif")) addOnce(out, "image/gif");
+            else if (v.startsWith(".jp")) addOnce(out, "image/jpeg");
+            else if (v.startsWith(".pdf")) addOnce(out, "application/pdf");
+            else if (v.startsWith(".txt") || v.startsWith(".md")) addOnce(out, "text/plain");
+        }
+        if (out.isEmpty()) return null;
+        return out.toArray(new String[0]);
+    }
+
+    private static void addOnce(java.util.ArrayList<String> list, String v) {
+        if (!list.contains(v)) list.add(v);
     }
 
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+
+        if (requestCode == REQ_CAPTURE_IMAGE && pendingCallback != null) {
+            ValueCallback<Uri[]> cb = pendingCallback;
+            pendingCallback = null;
+            File shot = capturePhotoFile;
+            capturePhotoFile = null;
+            if (resultCode == RESULT_OK && shot != null && shot.exists() && shot.length() > 0) {
+                cb.onReceiveValue(new Uri[]{SimpleFileProvider.uriFor(this, shot)});
+            } else {
+                if (shot != null) shot.delete();
+                cb.onReceiveValue(null);
+            }
+            return;
+        }
+
         if (requestCode != REQ_PICK_IMAGE || pendingCallback == null) return;
         ValueCallback<Uri[]> cb = pendingCallback;
         pendingCallback = null;
-        if (resultCode != RESULT_OK || data == null || data.getData() == null) {
+        if (resultCode != RESULT_OK || data == null) {
             cb.onReceiveValue(null);
             return;
         }
-        cb.onReceiveValue(new Uri[]{data.getData()});
+        // 多选优先读 ClipData；单选走 getData()
+        java.util.ArrayList<Uri> uris = new java.util.ArrayList<Uri>();
+        ClipData clip = data.getClipData();
+        if (clip != null) {
+            for (int i = 0; i < clip.getItemCount(); i++) {
+                Uri u = clip.getItemAt(i).getUri();
+                if (u != null) uris.add(u);
+            }
+        } else if (data.getData() != null) {
+            uris.add(data.getData());
+        }
+        if (uris.isEmpty()) {
+            cb.onReceiveValue(null);
+            return;
+        }
+        cb.onReceiveValue(uris.toArray(new Uri[0]));
     }
 
     @Override

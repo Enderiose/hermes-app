@@ -2,10 +2,34 @@
 
 **English** | [简体中文](README.md)
 
-A mobile WebView client for Hermes Web UI / Ekko Studio. Built without Gradle: aapt2 + javac + d8 + zipalign + apksigner.
+An Android client for your **self-hosted** Hermes Studio (hermes-web-ui **>= 0.7.13**).
+It talks to your own server directly — no cloud relay, no third-party account.
+Built without Gradle: aapt2 + javac + d8 + zipalign + apksigner.
+
+## Features
+
+- **Connection**: enter your Studio URL (LAN or reverse proxy). After login the app probes
+  `hermes_web_ui_version` and blocks versions below 0.7.13 with a clear message.
+  Previously used Studios are remembered for one-tap refill.
+- **Sessions**: category-grouped list, search, new / rename / pin / archive / delete;
+  live "running" state synced with the web UI.
+- **Chat**: streaming output, one-line reasoning, merged tool calls per run, queued messages
+  (insert / cancel), approval & clarify cards, task-plan card, workspace-diff card,
+  context-compression notices, command echoes.
+- **Attachments**: "+" → photos (multi-select) / camera / any file; full-screen image viewer;
+  long-press a bubble to copy its text. Images ≤20MB, other files ≤50MB.
+- **Workbench**: workflows (list / run / runs / stop), skills (toggle / edit content),
+  MCP (status / test / reload), memory (notes / user profile / soul), scheduled jobs
+  (pause / resume / run now / run history), usage stats, runtime monitor, logs.
+- **Appearance**: system / dark / light, line icons.
+- **WeCom**: read-only sync of WeCom bot sessions (tool grouping, context usage).
+
+`DEFAULT_BASE_URL` in `config.env` is only the login-page prefill; it can be changed in-app.
 
 - Artifact: `out/HermesMobile.apk`
-- Version source of truth: `VERSION` (edit this one file; build.sh injects it into the manifest, the Java source, and the web page)
+- Version source of truth: `VERSION` (edit this one file; build.sh injects it into the manifest, the Java source, and the web page).
+  Semver prereleases are supported (e.g. `1.0.0-alpha.2`); versionCode is derived as
+  `(major*10000+minor*100+patch)*100 + stage`, so upgrades always install over the previous build.
 - Pre-build config: `config.env` (default server address, likewise injected into the Java source and the web page by build.sh)
 
 ## Pre-build config (config.env)

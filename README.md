@@ -2,10 +2,29 @@
 
 [English](README_EN.md) | **简体中文**
 
-Hermes Web UI / Ekko Studio 的移动端 WebView 客户端。无 Gradle 构建：aapt2 + javac + d8 + zipalign + apksigner。
+自建 Hermes Studio（hermes-web-ui **≥ 0.7.13**）的 Android 客户端。直连你自己的服务端，
+不经任何云中继、不需要第三方账号；无 Gradle 构建：aapt2 + javac + d8 + zipalign + apksigner。
+
+## 功能
+
+- **连接**：登录页填 Studio 地址（LAN / 反代均可），登录后自动探测 `hermes_web_ui_version`，
+  低于 0.7.13 会明确阻止并提示升级；记住连过的 Studio，一键回填。
+- **会话**：按分类分组的会话列表、搜索、新建、重命名、置顶、归档、删除；运行中状态与 Web 端实时同步。
+- **聊天**：流式输出、思考过程折叠成一行、同轮工具调用合并、排队消息（插入/取消）、审批与追问卡片、
+  任务计划卡、本轮文件变更卡、上下文压缩提示、命令回显。
+- **附件**：「＋」→ 照片（相册多选）/ 拍摄（系统相机）/ 文件（任意类型）；图片支持全屏查看，
+  长按气泡复制文本。图片 ≤20MB、其他文件 ≤50MB。
+- **工作台**：工作流（列表/运行/记录/停止）、技能（启停/内容读写）、MCP（状态/测试/重载）、
+  记忆（笔记/画像/灵魂）、定时任务（暂停/恢复/立即运行/运行历史）、用量统计、运行监控、日志。
+- **外观**：跟随系统 / 深色 / 浅色三档；线性图标；手机端左右手布局。
+- **企微**：企业微信 Bot 会话只读同步（工具调用整合、上下文用量）。
+
+`config.env` 里的 `DEFAULT_BASE_URL` 只是登录页预填值，随时可在应用内改。
 
 - 产物：`out/HermesMobile.apk`
 - 版本真源：`VERSION`（改这一个文件即可，manifest / Java / 网页三处由 build.sh 注入）
+  支持语义化预发布（如 `1.0.0-alpha.2`）；versionCode 由 build.sh 按
+  `(major*10000+minor*100+patch)*100 + 阶段` 推导，保证可覆盖升级。
 - 构建前配置：`config.env`（默认服务器地址，同样由 build.sh 注入 Java / 网页）
 
 ## 构建前配置（config.env）

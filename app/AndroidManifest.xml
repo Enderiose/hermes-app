@@ -26,5 +26,12 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- 拍照输出用：file:// 在 Android 7+ 不能交给相机，必须 content:// -->
+        <provider
+            android:name=".SimpleFileProvider"
+            android:authorities="com.enderiose.hermes.files"
+            android:exported="false"
+            android:grantUriPermissions="true" />
     </application>
 </manifest>

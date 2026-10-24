@@ -12,12 +12,48 @@ GEN="$OUT/gen"
 OBJ="$OUT/obj"
 DEX="$OUT/dex"
 
-# 版本真源：$ROOT/VERSION。versionCode 取 major*100 + minor（0.2 -> 2）
+# 版本真源：$ROOT/VERSION（支持语义化预发布，如 1.0.0-alpha.2）
+# versionName = VERSION 原串；versionCode 由 major/minor/patch + 阶段推导，保证单调递增：
+#   base = major*10000 + minor*100 + patch
+#   alpha.N → base*100 + N        (N ≤ 29)
+#   beta.N  → base*100 + 30 + N   (N ≤ 29)
+#   rc.N    → base*100 + 60 + N   (N ≤ 38)
+#   稳定版  → base*100 + 99
+# 例：1.0.0-alpha.2 → 10000*100+2 = 1000002；1.0.0 → 1000099。
 VERSION="$(tr -d '[:space:]' < "$ROOT/VERSION")"
 [ -n "$VERSION" ] || { echo "VERSION file empty"; exit 1; }
-IFS='.' read -r VMAJOR VMINOR <<< "$VERSION"
+VERSION_CORE="${VERSION%%-*}"
+VERSION_PRE=""
+case "$VERSION" in
+  *-*) VERSION_PRE="${VERSION#*-}" ;;
+esac
+IFS='.' read -r VMAJOR VMINOR VPATCH <<< "$VERSION_CORE"
+VMAJOR="${VMAJOR:-0}"
 VMINOR="${VMINOR:-0}"
-VERSION_CODE=$((VMAJOR * 100 + VMINOR))
+VPATCH="${VPATCH:-0}"
+for n in "$VMAJOR" "$VMINOR" "$VPATCH"; do
+  case "$n" in
+    ''|*[!0-9]*) echo "VERSION 核心段必须是数字：$VERSION_CORE"; exit 1 ;;
+  esac
+done
+BASE=$((VMAJOR * 10000 + VMINOR * 100 + VPATCH))
+if [ -z "$VERSION_PRE" ]; then
+  STAGE=99
+else
+  PRE_KIND="${VERSION_PRE%%.*}"
+  PRE_NUM="${VERSION_PRE##*.}"
+  case "$PRE_NUM" in
+    ''|*[!0-9]*) PRE_NUM=0 ;;
+  esac
+  case "$PRE_KIND" in
+    alpha) STAGE=$((PRE_NUM)) ;;
+    beta)  STAGE=$((30 + PRE_NUM)) ;;
+    rc)    STAGE=$((60 + PRE_NUM)) ;;
+    *)     STAGE=$((PRE_NUM)) ;;
+  esac
+fi
+[ "$STAGE" -le 99 ] || { echo "预发布序号过大（需 ≤ 99）：$VERSION_PRE"; exit 1; }
+VERSION_CODE=$((BASE * 100 + STAGE))
 echo "== version ${VERSION} (code ${VERSION_CODE}) =="
 
 # 构建期配置真源：$ROOT/config.env。只解析 KEY=VALUE（不 source，免得配置里的命令被执行）。

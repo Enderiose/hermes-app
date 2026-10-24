@@ -28,4 +28,10 @@ dist/
 app/assets/www/inline.html
 
 # 内部工程上下文（含本机路径/私密信息，不进公开仓库）
+# docs/ 整目录都不公开：CONTEXT.md（工程上下文）、PITFALLS.md（踩坑）、PATCHES.md（版本/补丁流水）
 CONTEXT.md
+docs/
+
+# 维护期辅助脚本与历史残留（含本机路径、旧包名，不进公开仓库）
+tools/
+archive/
