@@ -1378,6 +1378,41 @@ async function openChatCatSheet() {
   $('chat-cat-sheet').classList.remove('hidden');
 }
 
+/**
+ * 会话列表的预览文本。
+ *
+ * 服务端的 `preview` 有时直接是 ContentBlock 数组的 JSON 原文
+ * （`[{"type":"text","text":"…"}]`，老会话首条消息带结构化 input 时就是这样），
+ * 直接 esc 出来就是满屏花括号。
+ *
+ * ⚠ 服务端给的是**截断过的** JSON（80 字左右就切），所以 `JSON.parse` 基本必然失败，
+ *   必须同时有「正则抓第一个 "text":"…"」的兜底，只写 parse 分支等于没修。
+ * 顺带去掉反引号 / `**`：列表里不需要行内代码样式。
+ */
+function previewText(raw) {
+  let s = String(raw == null ? '' : raw).trim();
+  if (s.charAt(0) === '[') {
+    let done = false;
+    try {
+      const arr = JSON.parse(s);
+      if (Array.isArray(arr)) {
+        const parts = arr.map((b) => {
+          if (!b || typeof b !== 'object') return typeof b === 'string' ? b : '';
+          return b.text || b.content || b.value || '';
+        }).filter(Boolean);
+        if (parts.length) { s = parts.join(' '); done = true; }
+      }
+    } catch (e) { /* 截断的 JSON → 走下面正则 */ }
+    if (!done) {
+      const m = s.match(/"text"\s*:\s*"((?:[^"\\]|\\.)*)/);
+      if (m) {
+        s = m[1].replace(/\\n/g, ' ').replace(/\\t/g, ' ').replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+      }
+    }
+  }
+  return s.replace(/[`]/g, '').replace(/\*\*/g, '').replace(/\s+/g, ' ').trim();
+}
+
 function rowHtml(s, target, showCategory) {
   const working = state.working[s.id];
   const isWecom = target === 'wecom-list';
@@ -1398,7 +1433,7 @@ function rowHtml(s, target, showCategory) {
         '<span class="row-title">' + esc(title) + '</span>' +
         '<span class="row-time">' + fmtTime(s.last_active || s.ended_at || s.started_at) + '</span>' +
       '</div>' +
-      '<div class="row-preview">' + esc(s.preview || '') + '</div>' +
+      '<div class="row-preview">' + esc(previewText(s.preview)) + '</div>' +
       '<div class="row-meta">' +
         (working ? '<span class="chip working">● 运行中</span>' : '') +
         (catName ? '<span class="chip cat">' + esc(catName) + '</span>' : '') +
