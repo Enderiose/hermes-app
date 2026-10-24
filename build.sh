@@ -182,9 +182,11 @@ fi
 "$BT/apksigner" sign --ks "$KS" --ks-pass pass:android --key-pass pass:android \
   --out "$OUT/HermesMobile.apk" "$OUT/app.build.apk"
 
-"$BT/apksigner" verify --print-certs "$OUT/HermesMobile.apk" | head -3
+# 注意：`| head -N` 会让上游命令吃 SIGPIPE，配合 set -o pipefail 会直接终止脚本
+# （表现为没打印 BUILD_OK、out/.gitkeep 被删、退出码非 0，而 APK 其实是好的）。截断输出的管道一律 `|| true`。
+"$BT/apksigner" verify --print-certs "$OUT/HermesMobile.apk" | head -3 || true
 echo "== badging =="
-"$BT/aapt2" dump badging "$OUT/HermesMobile.apk" | head -4
+"$BT/aapt2" dump badging "$OUT/HermesMobile.apk" | head -4 || true
 ls -la "$OUT/HermesMobile.apk"
 touch "$OUT/.gitkeep"   # 上面 rm -rf 把占位文件删了，补回来免得每次构建都变成删除
 
