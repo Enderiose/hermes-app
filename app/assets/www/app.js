@@ -67,6 +67,13 @@ const state = {
    * 这类会话没有 socket 状态，服务端 /usage 也查不到（studio 库只记自己跑的 run）。
    */
   hermesUsage: { input: 0, output: 0 },
+  /**
+   * 企微/hermes-history 会话的**当前上下文**估算（token）。这类会话拿不到服务端
+   * `contextTokens`（没有 socket），DB 里只有累计值 `input+output`（= 每次调用
+   * prompt 之和，长对话会显示成几百万）。由 loadMessages() 按消息字数折算，
+   * 见 estimateContextTokens()。
+   */
+  hermesCtx: 0,
   /** 正在插入中的排队消息 id（服务端 run.queue_insertion.updated 推来） */
   queueInsertingId: null,
   /** 展开的工具轮次：runMarker -> true */
@@ -1613,6 +1620,7 @@ async function openSession(id, title, hermes, model) {
   state.curProvider = (row && row.provider) || '';   // 查上下文上限要用会话自身的模型
   state.contextTokens = 0;      // 换会话先清零，等 resumed / usage.updated 回填
   state.hermesUsage = { input: 0, output: 0 };   // 同上：企微会话的用量由 loadMessages 回填
+  state.hermesCtx = 0;          // 企微会话的当前上下文估算，同样由 loadMessages 回填
   stopThinkingTimer();          // 计时归零，等 resumed 决定要不要起
   show('chat');
   atBottom = true;                // 打开会话先假定在底部
@@ -1656,6 +1664,8 @@ async function loadMessages() {
         input: Number(hs.input_tokens) || 0,
         output: Number(hs.output_tokens) || 0,
       };
+      // 当前上下文：按消息字数估算（DB 里只有累计值，见 estimateContextTokens 的注释）
+      state.hermesCtx = estimateContextTokens(msgs);
       state.lastHistoryRun = lastRunMarker(state.msgs);
       renderMsgs();
       jumpToLatest();      // 打开会话即定位到最新消息
@@ -2511,16 +2521,58 @@ function fmtTokens(n) {
   return String(Math.round(v));
 }
 
-function renderContextBar(used, limit) {
+/**
+ * 估算「当前上下文」有多少 token（企微/hermes-history 会话专用）。
+ *
+ * 为什么不直接用 DB 的 input_tokens+output_tokens：那是**每次 API 调用的 prompt
+ * 累加**，一轮对话里同一段历史被重复计费 N 次，长会话自然涨到几百万
+ * （实测某企微会话 1.63M「input」，真实最后一次 prompt 只有 126.9k）。
+ *
+ * 真值在 Hermes state.db 的 `sessions.model_config._usage_anchor.prompt_tokens`，
+ * 但 Studio 的 `/api/studio/sessions/hermes/:id` 不透出这个字段，客户端拿不到
+ * （改它要动 /app 里 Studio 自己的代码并重启容器，超出本 App 的范围）。
+ * 所以这里按消息字数折算：系数由 91 个真实会话的 anchor 做最小二乘拟合，
+ * 中位误差 ~10%（中文 0.905 token/字、其它 0.33 token/字、固定底噪 ~9.9k =
+ * 系统提示 + 工具 schema）。
+ *
+ * 口径：只算 content 与 tool_calls（与拟合样本一致），不含 reasoning_content。
+ */
+const CTX_CJK_RE = /[\u2e80-\u9fff\uf900-\ufaff\uff00-\uffef\u3000-\u303f]/g;
+const CTX_BASE = 9886;
+const CTX_PER_CJK = 0.9049;
+const CTX_PER_OTHER = 0.3298;
+
+function estimateContextTokens(msgs) {
+  let cjk = 0;
+  let other = 0;
+  for (const m of (msgs || [])) {
+    if (!m) continue;
+    for (const raw of [m.content, m.tool_calls]) {
+      if (!raw) continue;
+      const s = typeof raw === 'string' ? raw : JSON.stringify(raw);
+      const hit = s.match(CTX_CJK_RE);
+      const c = hit ? hit.length : 0;
+      cjk += c;
+      other += s.length - c;
+    }
+  }
+  if (!cjk && !other) return 0;
+  return Math.round(CTX_BASE + cjk * CTX_PER_CJK + other * CTX_PER_OTHER);
+}
+
+function renderContextBar(used, limit, estimated) {
   const text = $('ctx-text');
   const fill = $('ctx-fill');
   if (!text || !fill) return;
+  // 估算值前面加 ≈，鼠标/长按可看口径说明
+  const approx = estimated ? '≈' : '';
+  text.title = estimated ? '估算值：客户端按消息字数折算（服务端未透出真实 prompt 用量）' : '';
   // 有手选上限时覆盖服务端值
   const effective = getEffectiveLimit(limit);
   if (!effective || effective <= 0) {
     text.className = 'ctx-text';
     text.textContent = used > 0
-      ? '上下文 ' + fmtTokens(used) + ' · 上限未知'
+      ? '上下文 ' + approx + fmtTokens(used) + ' · 上限未知'
       : '上下文 —';
     fill.style.width = '0%';
     fill.className = 'ctx-fill';
@@ -2532,8 +2584,8 @@ function renderContextBar(used, limit) {
   text.className = 'ctx-text' + (level ? ' ' + level : '');
   // 手选上限时加个标记，提示这是覆盖值不是服务端
   const override = !!state.ctxLimitOverride;
-  text.textContent = '上下文 ' + fmtTokens(used) + ' / ' + fmtTokens(effective)
-    + ' · 余 ' + fmtTokens(Math.max(0, effective - used))
+  text.textContent = '上下文 ' + approx + fmtTokens(used) + ' / ' + fmtTokens(effective)
+    + ' · 余 ' + approx + fmtTokens(Math.max(0, effective - used))
     + ' (' + pct.toFixed(0) + '%)' + (override ? ' ▾' : '');
   fill.className = 'ctx-fill' + (level ? ' ' + level : '');
   fill.style.width = pct + '%';
@@ -2579,8 +2631,12 @@ function cycleContextLimit() {
  *
  * **企微（hermes-history）会话**：既没有 socket 状态（不发 `resume`），
  * `/api/studio/sessions/:id/usage` 也查不到（studio 库只记自己跑的 run，实测恒 0/0），
- * 所以用量取 `GET /api/studio/sessions/hermes/:id` 的 `input_tokens+output_tokens`
- * —— Hermes state.db 的会话累计，与 web 端对这类会话的 fallback 同口径。
+ * 所以走 `GET /api/studio/sessions/hermes/:id` 的 `messages`，
+ * 由 `estimateContextTokens()` **估算当前上下文**（带 ≈ 标记）。
+ *
+ * ⚠️ 不要再退回 `input_tokens+output_tokens`：那是 session 累计（每次调用的
+ * prompt 相加），实测某企微会话显示 1.63M，而真实最后一次 prompt 只有 126.9k，
+ * 面板上看着像一直在爆上下文。仅当 messages 为空（估算不出）才拿它兜底。
  */
 async function loadContextUsage() {
   const id = state.cur;
@@ -2602,10 +2658,17 @@ async function loadContextUsage() {
 
   // 2) 用量：优先 socket 带的 contextTokens
   let used = Number(state.contextTokens) || 0;
+  let estimated = false;
   // 2b) 企微等 hermes-history 会话不走 socket、也没有 studio 用量记录 →
-  //     用 /sessions/hermes/:id 的 in+out（loadMessages 已回填），否则恒为 0
+  //     用 loadMessages 估好的当前上下文（≈）；估不出才拿 in+out 兜底
   if (!used && state.curHermes) {
-    used = (Number(state.hermesUsage.input) || 0) + (Number(state.hermesUsage.output) || 0);
+    const est = Number(state.hermesCtx) || 0;
+    if (est > 0) {
+      used = est;
+      estimated = true;
+    } else {
+      used = (Number(state.hermesUsage.input) || 0) + (Number(state.hermesUsage.output) || 0);
+    }
   }
   if (!used) {
     // 退路：REST 的 input+output（与 web 版 fallback 一致，不加 cache_read）
@@ -2617,7 +2680,7 @@ async function loadContextUsage() {
       used = (Number(usage.input_tokens) || 0) + (Number(usage.output_tokens) || 0);
     }
   }
-  renderContextBar(used, limit);
+  renderContextBar(used, limit, estimated);
 }
 
 /** socket 事件里带 contextTokens 时统一走这里。 */
