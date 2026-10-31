@@ -25,6 +25,9 @@ import time
 
 from playwright.sync_api import sync_playwright
 
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'scripts'))
+from _launch import LAUNCH_ARGS  # noqa: E402
 TOKEN = open('/home/agent/.hermes-web-ui/profiles/enderiose/.model-run-token').read().strip()
 BASE = 'http://127.0.0.1:6060'
 HTML = open('/home/agent/.hermes/hermes-app/app/assets/www/inline.html', encoding='utf-8').read()
@@ -39,7 +42,7 @@ def run_case(mode):
     body = CONTROL_HTML if mode == 'control' else HTML
     sid = 'qdup-%s-%d' % (mode, int(time.time()))
     with sync_playwright() as p:
-        b = p.chromium.launch(args=['--disable-features=LocalNetworkAccessChecks'])
+        b = p.chromium.launch(args=LAUNCH_ARGS)
         ctx = b.new_context(viewport={'width': 390, 'height': 844})
         ctx.add_init_script(
             "localStorage.setItem('hm_base', %s);localStorage.setItem('hm_token', %s);"

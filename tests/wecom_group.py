@@ -5,11 +5,15 @@
 """
 import json
 import os
+import sys
 from collections import Counter
 from urllib import request as urlreq
 
 from playwright.sync_api import sync_playwright
 
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'scripts'))
+from _launch import LAUNCH_ARGS  # noqa: E402
 TOKEN = open('/home/agent/.hermes-web-ui/profiles/enderiose/.model-run-token').read().strip()
 BASE = 'http://127.0.0.1:6060'
 INLINE = '/home/agent/.hermes/hermes-app/app/assets/www/inline.html'
@@ -34,7 +38,7 @@ def api(path):
 
 
 with sync_playwright() as p:
-    browser = p.chromium.launch(args=['--disable-features=LocalNetworkAccessChecks'])
+    browser = p.chromium.launch(args=LAUNCH_ARGS)
     ctx = browser.new_context(viewport={'width': 390, 'height': 844}, device_scale_factor=2)
     ctx.add_init_script(
         "localStorage.setItem('hm_base', %s);localStorage.setItem('hm_token', %s);"
@@ -53,9 +57,19 @@ with sync_playwright() as p:
     wrows = page.locator('#wecom-list .row')
     check('企微列表有会话', wrows.count() > 0, wrows.count())
     check('企微行不给分类入口（只读）', page.locator('#wecom-list .row .row-more').count() == 0)
-    title = wrows.first.inner_text().split('\n')[0]
-    print('打开:', title[:40])
-    wrows.first.click()
+    # 挑「消息条数最多」的那条：列表首行可能是刚建的测试会话（3 条、没有工具调用），
+    # 拿它测工具整合会一直等不到 .tool-run-row。
+    import re as _re
+    best_i, best_n = 0, -1
+    for i in range(wrows.count()):
+        txt = wrows.nth(i).inner_text()
+        m = _re.search(r'(\d+)\s*条', txt)
+        n = int(m.group(1)) if m else 0
+        if n > best_n:
+            best_i, best_n = i, n
+    title = wrows.nth(best_i).inner_text().split('\n')[0]
+    print('打开:', title[:40], '(%d 条)' % best_n)
+    wrows.nth(best_i).click()
     page.wait_for_timeout(5000)
 
     st = page.evaluate("""() => {
@@ -133,11 +147,17 @@ with sync_playwright() as p:
     }""")
     print(json.dumps(st2, ensure_ascii=False))
     raw2 = api('/api/studio/sessions/hermes/%s?profile=enderiose' % st2['sid'])
-    msgs2 = (raw2.get('session') or {}).get('messages') or []
+    sess2 = raw2.get('session') or {}
+    msgs2 = sess2.get('messages') or []
     results2 = [m for m in msgs2 if (m.get('display_role') or m.get('role')) == 'tool' and m.get('tool_name')]
+    # 基准用会话元数据里的 tool_call_count，而不是「有结果行的工具消息数」：
+    # 会话被 session_reset 掐断时，最后一次工具调用**只有发起、没有结果行**
+    # （实测 20261018_094654_38793fb1：tool_call_count=155，role=tool 消息只有 154）。
+    # 客户端把那次调用也画出来是对的，所以按 155 比。
+    expect2 = sess2.get('tool_call_count') or len(results2)
     check('第二个会话：有整合行且无散落单条', st2['groups'] > 0 and st2['loose'] == 0, st2['groups'])
-    check('第二个会话：分组条数 == 服务端结果行数', st2['sum'] == len(results2),
-          'dom=%s api=%s' % (st2['sum'], len(results2)))
+    check('第二个会话：分组条数 == 服务端工具调用数', st2['sum'] == expect2,
+          'dom=%s expect=%s (结果行 %s)' % (st2['sum'], expect2, len(results2)))
     check('第二个会话：分了多少轮（不止一组）', st2['groups'] > 1, st2['groups'])
     page.screenshot(path=OUT + '/02-wecom-long.png', full_page=False)
 

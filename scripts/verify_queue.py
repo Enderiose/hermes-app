@@ -5,9 +5,13 @@
 """
 import json
 import os
+import sys
 
 from playwright.sync_api import sync_playwright
 
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '.'))
+from _launch import LAUNCH_ARGS  # noqa: E402
 TOKEN = open('/home/agent/.hermes-web-ui/profiles/enderiose/.model-run-token').read().strip()
 BASE = 'http://127.0.0.1:6060'
 INLINE = '/home/agent/.hermes/hermes-app/app/assets/www/inline.html'
@@ -16,7 +20,7 @@ os.makedirs(OUT, exist_ok=True)
 HTML = open(INLINE, encoding='utf-8').read()
 
 with sync_playwright() as p:
-    browser = p.chromium.launch()
+    browser = p.chromium.launch(args=LAUNCH_ARGS)
     ctx = browser.new_context(viewport={'width': 390, 'height': 844}, device_scale_factor=2)
     ctx.add_init_script(
         "localStorage.setItem('hm_base', %s);"
@@ -78,15 +82,32 @@ with sync_playwright() as p:
       emitted: window.__emitted,
       userMsgs: document.querySelectorAll('#msg-list .msg.user').length,
     })""")
-    print('  剩余排队:', n['queuedLeft'], '(应剩 1)')
+    print('  剩余排队:', n['queuedLeft'], '(本地不乐观移除，等服务端 dequeue；见 v0.20 设计)')
     print('  emit 记录:', json.dumps(n['emitted'], ensure_ascii=False)[:200])
     print('  user 消息数:', n['userMsgs'])
-    page.screenshot(path=OUT + '/61-after-send.png')
 
     print()
-    print('=== 3. 队列区应只剩 1 条 ===')
-    left = page.evaluate("() => [...document.querySelectorAll('.queued-item')].length")
-    print('  剩余 queued-item:', left, '(应剩 1)')
+    print('=== 3. 服务端确认 dequeue 后，队列区才少一条 ===')
+    # v0.20/v0.23 的约定：**不做乐观移除**。点「插入」只发 insert_queued_run，
+    # 真正挪进消息流要等服务端 run.queued 带 dequeued_queue_id；随后 applyQueueSnapshot(ev)
+    # 用服务端快照覆盖本地队列（这一步才是移除）。这里按同样顺序模拟。
+    page.evaluate("""() => {
+      const q = (state.queued || []).find((x) => String(x.id) === 'q1');
+      promoteQueuedMessage(q, 'q1');                       // 1) 挪进消息流（只插一次）
+      applyQueueSnapshot({ queueMessages: [                 // 2) 服务端快照：q1 已不在队列
+        { id: 'q2', role: 'user', content: '第二条排队：然后写单元测试', timestamp: Math.floor(Date.now()/1000) },
+      ]});
+      renderMsgs();
+    }""")
+    page.wait_for_timeout(500)
+    left = page.evaluate("() => ({ items: [...document.querySelectorAll('.queued-item')].length, queued: state.queued.length })")
+    print('  剩余 queued-item:', left['items'], '(应剩 1)  state.queued:', left['queued'])
+    if left['items'] != 1:
+        errs.append('dequeue 后队列区应剩 1 条，实际 %d' % left['items'])
+    dup = page.evaluate("() => state.msgs.filter(m => m.queueId === 'q1').length")
+    print('  消息流里 q1 的条数:', dup, '(应为 1，重复事件不应插两条)')
+    if dup != 1:
+        errs.append('q1 在消息流里出现 %d 次' % dup)
 
     print()
     print('=== 页面错误 ===', errs[-4:] if errs else '无')

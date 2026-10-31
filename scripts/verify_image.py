@@ -8,10 +8,14 @@
 import base64
 import json
 import os
+import sys
 
 import urllib.request
 from playwright.sync_api import sync_playwright
 
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '.'))
+from _launch import LAUNCH_ARGS  # noqa: E402
 TOKEN = open('/home/agent/.hermes-web-ui/profiles/enderiose/.model-run-token').read().strip()
 BASE = 'http://127.0.0.1:6060'
 INLINE = '/home/agent/.hermes/hermes-app/app/assets/www/inline.html'
@@ -24,7 +28,7 @@ print('  含 data:image/png 助手头像:', 'src="data:image/png;base64,' in HTM
 print('  残留占位符:', '__HERMES_BOT_ICON__' in HTML)
 
 with sync_playwright() as p:
-    browser = p.chromium.launch()
+    browser = p.chromium.launch(args=LAUNCH_ARGS)
     ctx = browser.new_context(viewport={'width': 390, 'height': 844}, device_scale_factor=2)
     ctx.add_init_script(
         "localStorage.setItem('hm_base', %s);"
@@ -58,37 +62,23 @@ with sync_playwright() as p:
 
     print()
     print('=== 2. 真实上传测试 ===')
-    # 生成一张真实 PNG
-    png = base64.b64decode(
-        'iVBORw0KGgoAAAANSUhEUgAAAEAAAABAAQMAAACQp+OdAAAABlBMVEX/'
-        'AAD//wAA/wEBvQAAAApJREFUeNrtwTEBACAMA7DEf9/HTQ2oICKZ5H8n'
-        'BWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYW'
-        'FhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFh'
-        'YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYW'
-        'FhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFh'
-        'YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYW'
-        'FhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFh'
-        'YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYW'
-        'FhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFh'
-        'YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYW'
-        'FhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFh'
-        'YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYW'
-        'FhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFh'
-        'YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYW'
-        'FhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFh'
-        'YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYW'
-        'FhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFh'
-        'YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYW'
-        'FhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFh'
-        'YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYW'
-        'FhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFh'
-        'YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYW'
-        'FhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFh'
-        'YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYW'
-        'FhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFh'
-        'YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYW'
-        'FhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFh'
-        'AAAAAElFTkSuQmCC')
+    # 生成一张**真正能被解码**的 PNG。
+    # ⚠ 旧版这里是一段手抄 base64，Chrome 解不出来（fetch 200 但 <img> onerror），
+    #   曾误判成「图片显示坏了」——别再换回那段。
+    import struct
+    import zlib
+
+    def tiny_png(w=8, h=8):
+        def chunk(tag, data):
+            return (struct.pack('>I', len(data)) + tag + data
+                    + struct.pack('>I', zlib.crc32(tag + data) & 0xffffffff))
+        raw = b''.join(b'\x00' + b'\xff\x00\x00' * w for _ in range(h))
+        return (b'\x89PNG\r\n\x1a\n'
+                + chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 2, 0, 0, 0))
+                + chunk(b'IDAT', zlib.compress(raw))
+                + chunk(b'IEND', b''))
+
+    png = tiny_png()
     b64 = base64.b64encode(png).decode()
     res = page.evaluate("""async (b64) => {
       const blob = await (await fetch('data:image/png;base64,' + b64)).blob();
@@ -137,9 +127,11 @@ with sync_playwright() as p:
     page.screenshot(path=OUT + '/11-image-in-msg.png')
 
     print()
-    print('=== 4. 图片按钮存在 ===')
-    print('  #chat-img 可见:', page.locator('#chat-img').is_visible())
-    print('  #img-picker 存在:', page.locator('#img-picker').count())
+    print('=== 4. 附件入口（v1.0 起由附件面板取代旧的图片按钮） ===')
+    print('  #chat-plus 存在:', page.locator('#chat-plus').count())
+    print('  #attach-panel 存在:', page.locator('#attach-panel').count())
+    print('  三个 file input:', page.evaluate(
+        "() => ['pick-photo','pick-camera','pick-file'].filter(i => document.getElementById(i)).length"))
 
     print()
     print('=== 页面错误 ===')

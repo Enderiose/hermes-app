@@ -1,9 +1,13 @@
 """验证：打开会话后应定位到最下方（最新消息可见），而不是停在第一条。"""
 import json
 import os
+import sys
 
 from playwright.sync_api import sync_playwright
 
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '.'))
+from _launch import LAUNCH_ARGS  # noqa: E402
 TOKEN = open('/home/agent/.hermes-web-ui/profiles/enderiose/.model-run-token').read().strip()
 BASE = 'http://127.0.0.1:6060'
 INLINE = '/home/agent/.hermes/hermes-app/app/assets/www/inline.html'
@@ -12,7 +16,7 @@ os.makedirs(OUT, exist_ok=True)
 HTML = open(INLINE, encoding='utf-8').read()
 
 with sync_playwright() as p:
-    browser = p.chromium.launch()
+    browser = p.chromium.launch(args=LAUNCH_ARGS)
     ctx = browser.new_context(viewport={'width': 390, 'height': 844}, device_scale_factor=2)
     ctx.add_init_script(
         "localStorage.setItem('hm_base', %s);"

@@ -5,11 +5,15 @@
 """
 import json
 import os
+import sys
 import time
 from urllib import request as urlreq
 
 from playwright.sync_api import sync_playwright
 
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'scripts'))
+from _launch import LAUNCH_ARGS  # noqa: E402
 TOKEN = open('/home/agent/.hermes-web-ui/profiles/enderiose/.model-run-token').read().strip()
 BASE = 'http://127.0.0.1:6060'
 INLINE = '/home/agent/.hermes/hermes-app/app/assets/www/inline.html'
@@ -46,7 +50,7 @@ def api(method, path, body=None):
 
 
 with sync_playwright() as p:
-    browser = p.chromium.launch(args=['--disable-features=LocalNetworkAccessChecks'])
+    browser = p.chromium.launch(args=LAUNCH_ARGS)
     ctx = browser.new_context(viewport={'width': 390, 'height': 844}, device_scale_factor=2)
     ctx.add_init_script(
         "localStorage.setItem('hm_base', %s);localStorage.setItem('hm_token', %s);"
